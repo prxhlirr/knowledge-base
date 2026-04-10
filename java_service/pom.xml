@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.3.5.RELEASE</version>
+        <relativePath/> <!-- lookup parent from repository -->
+    </parent>
+    <groupId>com.boyang.search</groupId>
+    <artifactId>knowledge-base</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <name>knowledge-base</name>
+    <description>Boyang Knowledge Base Vector Search Gateway</description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <java.version>1.8</java.version>
+        <!-- ES 需要使用 8.6.x 客户端对应服务端版本，解决兼容性 -->
+        <elasticsearch.version>8.6.2</elasticsearch.version>
+        <jackson.version>2.14.0</jackson.version>
+        <okhttp3.version>4.8.1</okhttp3.version>
+    </properties>
+
+    <dependencies>
+        <!-- Web & Mvc -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- AOP 支持（OperationLogAspect 切面依赖此模块） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aop</artifactId>
+        </dependency>
+
+        <!-- Elasticsearch 8.6.x Java API Client -->
+        <dependency>
+            <groupId>co.elastic.clients</groupId>
+            <artifactId>elasticsearch-java</artifactId>
+            <version>${elasticsearch.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-core</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-annotations</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+
+        <!-- PostgreSQL 依赖 -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- MyBatis Plus -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-boot-starter</artifactId>
+            <version>3.5.1</version>
+        </dependency>
+
+        <!-- Redis -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- ES 8.x Jackson Json Provider 依赖补全 -->
+        <dependency>
+            <groupId>jakarta.json</groupId>
+            <artifactId>jakarta.json-api</artifactId>
+            <version>2.0.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.parsson</groupId>
+            <artifactId>parsson</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+        <!-- Lombok 简化代码 -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- SSH / SFTP 客户端 -->
+        <dependency>
+            <groupId>com.jcraft</groupId>
+            <artifactId>jsch</artifactId>
+            <version>0.1.55</version>
+        </dependency>
+
+        <!-- MinIO 对象存储 -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <version>8.5.2</version>
+        </dependency>
+
+        <!-- 通用 IO 工具 -->
+        <dependency>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+            <version>2.11.0</version>
+        </dependency>
+
+        <!-- Spring Kafka -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+
+        <!-- Test -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Resilience4j 熔断降级 -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot2</artifactId>
+            <version>1.7.0</version>
+        </dependency>
+
+        <!-- JWT 验签（JJWT 0.11.x，兼容 Java 8 / Spring Boot 2.3.x） -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>0.11.5</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>0.11.5</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>0.11.5</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Spring Boot 配置处理器（支持 @ConfigurationProperties IDE 自动补全） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-configuration-processor</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Flyway 数据库版本迁移（替代手动 CommandLineRunner DDL，生产级 Schema 管理） -->
+        <!-- Spring Boot 2.3.x 对应 Flyway 6.x，无需指定 version（由 spring-boot-starter-parent 管理） -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <!-- Dynamic DataSource (Druid) -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>dynamic-datasource-spring-boot-starter</artifactId>
+            <version>3.2.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>druid-spring-boot-starter</artifactId>
+            <version>1.1.22</version>
+        </dependency>
+
+        <!-- XXL-JOB -->
+        <dependency>
+            <groupId>com.xuxueli</groupId>
+            <artifactId>xxl-job-core</artifactId>
+            <version>2.2.0</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <!-- OOM 修复：升级默认堆至 2GB，启用 G1GC 减少 Full GC 停顿 -->
+                    <!-- fork=true: 必须启用，否则 jvmArguments 在 mvn spring-boot:run 下无法传递给子进程 -->
+                    <fork>true</fork>
+                    <jvmArguments>-Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200</jvmArguments>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.8.1</version>
+                <configuration>
+                    <source>${java.version}</source>
+                    <target>${java.version}</target>
+                    <!-- 显式指定 UTF-8 防止 Windows 平台 javac 按 GBK 读源码导致非法字符报错 -->
+                    <encoding>UTF-8</encoding>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

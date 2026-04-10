@@ -1,0 +1,40 @@
+# ===================================================================
+# 容器部署专用环境 (Profile: prod)
+# 全面云原生弹性绑定，利用环境变量将所有基础设施的连接权移交给总控方。
+# ===================================================================
+
+spring:
+  # PostgreSQL 容器网络配置
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:knowledge_base}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:liyz}
+    
+  # Redis 缓存容器网络配置
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
+
+# AI Python 服务调用节点配置
+ai:
+  service:
+    host: ${AI_SERVICE_HOST:http://127.0.0.1:8001}
+
+# MinIO 对象存储配置
+minio:
+  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+  accessKey: ${MINIO_ACCESS_KEY:admin}
+  secretKey: ${MINIO_SECRET_KEY:liyz123}
+  bucketName: knowledge-base
+
+# Elasticsearch 搜索节点配置
+elasticsearch:
+  host: ${ES_HOST:localhost}
+  port: ${ES_PORT:9200}
+  username: ${ES_USERNAME:admin}
+  password: ${ES_PASSWORD:8732391}
+
+search:
+  use-v2: true

@@ -1,0 +1,24 @@
+{
+  "success": true,
+  "message": "",
+  "code": 0,
+  "result": {
+    "id": "698107103444729856",
+    "parentId": "",
+    "parentCode": "",
+    "departName": "模拟单位1",
+    "departNameEn": "mock",
+    "departNameAbbr": "单位1",
+    "orgCategory": "1",
+    "orgType": "11",
+    "orgCode": "620000040000",
+    "status": "1",
+    "delFlag": 0,
+    "policeCategory": "1",
+    "isJq": "1",
+    "bmjz": "JZ35",
+    "signCode": "620000040000",
+    "px": 4
+  },
+  "timestamp": "{{timestamp}}"
+}

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<!--
+  操作日志 Mapper XML
+  业务功能：提供多条件动态分页查询 SQL，供管理界面检索日志记录
+  关键设计：所有条件均通过 <if> 标签动态拼接，缺省条件不影响查询效果
+-->
+<mapper namespace="com.boyang.search.mapper.SysOperationLogMapper">
+
+    <!--
+      多条件分页查询操作日志
+      逻辑：按存在的条件组合 WHERE 子句，固定按 created_at DESC 排序
+      注意：userid 使用 LIKE 模糊匹配，其余字段使用精确匹配，保持性能
+    -->
+    <select id="selectPageByCondition" resultType="com.boyang.search.entity.SysOperationLog">
+        SELECT *
+        FROM sys_operation_log
+        <where>
+            <!-- 操作人 ID 模糊匹配（支持部分 ID 检索） -->
+            <if test="userId != null and userId != ''">
+                AND user_id LIKE CONCAT('%', #{userId}, '%')
+            </if>
+            <!-- 操作模块精确匹配 -->
+            <if test="module != null and module != ''">
+                AND module = #{module}
+            </if>
+            <!-- 机构代码精确匹配 -->
+            <if test="deptCode != null and deptCode != ''">
+                AND dept_code = #{deptCode}
+            </if>
+            <!-- 服务来源精确匹配（java_service / ai_service） -->
+            <if test="serviceName != null and serviceName != ''">
+                AND service_name = #{serviceName}
+            </if>
+            <!-- 成功标志精确匹配 -->
+            <if test="success != null">
+                AND success = #{success}
+            </if>
+            <!-- 时间范围下界（含边界） -->
+            <if test="startTime != null and startTime != ''">
+                AND created_at &gt;= #{startTime}::TIMESTAMP
+            </if>
+            <!-- 时间范围上界（含边界） -->
+            <if test="endTime != null and endTime != ''">
+                AND created_at &lt;= #{endTime}::TIMESTAMP
+            </if>
+        </where>
+        ORDER BY created_at DESC
+    </select>
+
+</mapper>

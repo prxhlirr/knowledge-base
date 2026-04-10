@@ -1,0 +1,69 @@
+# ===================================================================
+# 本地开发专用环境 (Profile: dev)
+# 纯纯的本地地址，绝不读取任何系统/容器环境变量，防止宿主机污染串台。
+# ===================================================================
+
+spring:
+  datasource:
+    dynamic:
+      primary: master
+      strict: false
+      datasource:
+        master:
+          url: jdbc:postgresql://127.0.0.1:5432/knowledge_base?sslmode=disable&serverTimezone=Asia/Shanghai
+          username: postgres
+          password: liyz
+          driver-class-name: org.postgresql.Driver
+        kb_source:
+          url: jdbc:postgresql://127.0.0.1:5432/knowledge_base?sslmode=disable&serverTimezone=Asia/Shanghai
+          username: postgres
+          password: liyz
+          driver-class-name: org.postgresql.Driver
+      
+  # Redis 缓存配置
+  redis:
+    host: 192.168.74.1
+    port: 6379
+    password: 
+
+# AI Python 服务调用节点配置
+ai:
+  service:
+    host: http://192.168.74.1:8001
+
+# MinIO 对象存储配置
+minio:
+  endpoint: http://192.168.74.1:9000
+  accessKey: admin
+  secretKey: password123
+  bucketName: knowledge-base
+
+# Elasticsearch 搜索节点配置
+elasticsearch:
+  host: 192.168.74.1
+  port: 9200
+  username: admin
+  password: 8732391
+
+# 搜索 SLA 配置（开发模式适度放宽，但不超过 6s 以便暴露性能问题）
+# 生产环境通过 application.yml 覆盖为更严格的 3000ms
+search:
+  use-v2: true
+  total:
+    sla-ms: 10000
+
+xxl:
+  job:
+    admin:
+      addresses: http://127.0.0.1:8080/xxl-job-admin
+    executor:
+      appname: kb-handler-dev
+      port: 9999
+      logpath: /data/applogs/xxl-job/jobhandler
+      logretentiondays: 15
+
+knowledge-base:
+  extract:
+    # 智能分流大小界限（默认5MB）
+    threshold-bytes: 5242880
+    delivery-mode: auto

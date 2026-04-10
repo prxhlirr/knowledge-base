@@ -1,0 +1,127 @@
+# ============================================================
+# 知识库 Java 服务 - 外部配置文件（可手动编辑）
+# 修改后执行 docker restart kb-java 即可生效，无需重建镜像
+# ============================================================
+
+server:
+  port: 8080
+
+spring:
+  application:
+    name: knowledge-base-gateway
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+
+  # ── PostgreSQL ────────────────────────────────────────────
+  # 容器网络中使用服务名 database_pg（而非 localhost）
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://database_pg:5432/knowledge_base
+    username: kb_admin
+    password: <CHANGE_ME_PG_PASSWORD>   # ← 修改为实际密码
+
+  # ── Redis ─────────────────────────────────────────────────
+  redis:
+    host: redis_cache
+    port: 6379
+    password: <CHANGE_ME_REDIS_PASSWORD>  # ← 修改为实际密码
+
+  # ── Kafka ─────────────────────────────────────────────────
+  kafka:
+    bootstrap-servers: kafka_broker:9092
+    consumer:
+      group-id: kb-doc-ingest
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      max-poll-records: 10
+    producer:
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  global-config:
+    db-config:
+      id-type: auto
+
+# ── AI Python 服务 ────────────────────────────────────────────
+ai:
+  service:
+    host: http://ai_service:8001
+
+# ── MinIO ────────────────────────────────────────────────────
+minio:
+  endpoint: http://minio_storage:9000
+  accessKey: <CHANGE_ME_MINIO_ACCESS_KEY>    # ← 修改
+  secretKey: <CHANGE_ME_MINIO_SECRET_KEY>    # ← 修改
+  bucketName: knowledge-base
+
+# ── Elasticsearch ─────────────────────────────────────────────
+elasticsearch:
+  host: es86
+  port: 9200
+  username: ""     # xpack.security.enabled=false 时留空即可
+  password: ""
+
+# ── Kafka Topic ───────────────────────────────────────────────
+kafka:
+  topic:
+    doc-notify: kb.doc.notify
+
+# ── SFTP ─────────────────────────────────────────────────────
+sftp:
+  known-hosts-path: /app/config/.ssh/known_hosts
+  credentials:
+    fileserver-prod:
+      host: file-server.internal      # ← 修改为实际文件服务器地址
+      port: 22
+      user: sftp-reader
+      password: <CHANGE_ME_SFTP_PASSWORD>   # ← 修改
+
+# ── 内部服务凭证 ──────────────────────────────────────────────
+# 生产环境务必修改！
+kb:
+  internal:
+    token: <CHANGE_ME_KB_INTERNAL_TOKEN>    # ← 修改（随机字符串）
+
+# ── JWT 验签 ──────────────────────────────────────────────────
+jwt:
+  dev-mode: false                  # 生产环境设为 false
+  header: Authorization
+  secret: <CHANGE_ME_JWT_SECRET_32CHARS>  # ← 修改（≥32字符）
+  public-key-base64: ""            # RS256 公钥，留空使用 HS256
+  claim:
+    user-id: userId
+    dept-code: deptCode
+    app-code: appCode
+
+# ── 搜索配置 ──────────────────────────────────────────────────
+search:
+  trust-gateway-headers: false     # 生产环境设为 true
+  total:
+    sla-ms: 5000
+
+# ── CORS ──────────────────────────────────────────────────────
+# 修改为实际前端访问域名，禁止使用 * 通配
+cors:
+  allowed-origins: http://localhost:5173,http://localhost:5174
+
+# ── 本地文件存储路径 ───────────────────────────────────────────
+storage:
+  local:
+    path: /app/uploads
+
+# ── 外部机构/部门同步 ──────────────────────────────────────────
+external:
+  org:
+    api:
+      dept-tree-url: ""    # ← 填写外部部门树接口（可选）
+      token: ""
+    dev-mode: true         # 无外部接口时设为 true 使用内置测试数据
+    sync:
+      enabled: false       # 有外部接口时设为 true
+    sync-cron: "0 0 * * * ?"

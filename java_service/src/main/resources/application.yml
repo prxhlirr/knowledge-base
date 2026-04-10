@@ -1,0 +1,172 @@
+server:
+  port: 8080
+
+spring:
+  profiles:
+    # 默认触发安全脱机的“纯本地模式（dev）”，以阻断各种串台假象
+    active: dev
+    
+  application:
+    name: knowledge-base-gateway
+
+  # Flyway 数据库版本迁移配置
+  # baseline-on-migrate=true：对已存在的数据库打基线，避免 Flyway 对历史库报"不干净"错误
+  # locations：迁移脚本目录，命名规范 V{版本}__{描述}.sql
+  # flyway:
+  #   enabled: true
+  #   baseline-on-migrate: true
+  #   baseline-version: 0
+  #   locations: classpath:db/migration
+
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+
+
+# 强制切换应用文件落脚点至纯云架构的 MinIO，关闭所有本地直连可能
+knowledge:
+  base:
+    storage-type: minio
+
+mybatis-plus:
+  # classpath*:mapper/**/*.xml 支持子目录下的所有 XML（如 mapper/SysOperationLogMapper.xml）
+  mapper-locations: classpath*:mapper/**/*.xml
+  global-config:
+    db-config:
+      id-type: auto
+
+
+
+
+  # [Kafka 接入] 启用 Kafka 消费者，消费外部系统推送的文档通知
+  kafka:
+    bootstrap-servers: ${KAFKA_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_GROUP_ID:kb-doc-ingest}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # 每次最多拉取 10 条，防止 SFTP 下载阻塞消费线程
+      max-poll-records: 10
+    producer:
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+# [A-4 修复] SFTP 凭据改为配置文件管理，移除接口明文密码
+# 生产环境通过环境变量注入：SFTP_PASSWORD=xxx
+sftp:
+  known-hosts-path: ${SFTP_KNOWN_HOSTS_PATH:~/.ssh/known_hosts}
+  # 预配置的服务器凭据，key=credentialId（由业务管理员分配）
+  credentials:
+    fileserver-prod:
+      host: ${SFTP_FS_HOST:file-server.internal}
+      port: ${SFTP_FS_PORT:22}
+      user: ${SFTP_FS_USER:sftp-reader}
+      password: ${SFTP_FS_PASSWORD:change-me}
+    fileserver-dev:
+      host: localhost
+      port: 22
+      user: dev
+      password: ${SFTP_DEV_PASSWORD:dev-password}
+
+# Kafka Topic 配置（与业务侧约定的 Topic 名称）
+kafka:
+  topic:
+    doc-notify: ${KAFKA_TOPIC_DOC_NOTIFY:kb.doc.notify}
+
+# 内部服务凭证（P0-1：从代码硬编码迁移至配置，生产环境必须通过 KB_INTERNAL_TOKEN 环境变量覆盖）
+kb:
+  internal:
+    token: ${KB_INTERNAL_TOKEN:kb-dev-token-change-me-in-prod}
+
+# 搜索服务安全配置（P0-6 / P1-3）
+search:
+  # 强制使用 V2 Pipeline 重构架构，彻底摒弃旧版 SearchService
+  use-v2: true
+  # 生产环境设为 true，要求网关注入 X-Gateway-Signature；开发环境设为 false 跳过校验
+  trust-gateway-headers: false
+  # 搜索总 SLA 超时（ms）
+  # 延迟预算: ES<100ms + BGE-M3<300ms + Rerank(GPU)<200ms + 网络+处理<400ms = 1s 以内（理想）
+  # 非 HyDE 路径: 目标 <2000ms；HyDE 路径（长查询）: 目标 <3000ms
+  total:
+    sla-ms: 3000
+
+# [A-1 修复] CORS 来源白名单（逗号分隔，支持通配符如 https://*.domain.com）
+# 生产环境必须改为实际域名，禁止使用 * 通配
+cors:
+  allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:5174,http://localhost:3000,http://192.168.74.1:5173}
+
+# [D-1 修复] 本地文件存储路径（替代硬编码桌面路径）
+# 生产环境修改为实际挂载路径，如 /data/kb-uploads
+storage:
+  local:
+    path: ${STORAGE_LOCAL_PATH:${java.io.tmpdir}/kb-uploads}
+
+
+
+# ─── JWT 验签配置 ───────────────────────────────────────────────────────────
+# 验签关闭状态（dev-mode=true）：从 X-User-Id / X-User-Dept Header 直接信任身份（仅用于本地联调）
+# 验签开启状态（dev-mode=false + search.trust-gateway-headers=true）：必须携带 JWT，从 Claims 提取身份
+jwt:
+  # 开发模式：true=跳过验签(联调用)，false=强制验签(生产)
+  dev-mode: ${JWT_DEV_MODE:true}
+  # JWT 所在 Header（Bearer 格式：Authorization: Bearer <token>）
+  header: ${JWT_HEADER:Authorization}
+  # HS256 对称密钥（≥32字符），生产环境通过环境变量 JWT_SECRET 注入，绝对不能使用默认值
+  secret: ${JWT_SECRET:default-dev-secret-must-change-in-prod-32chars}
+  # RS256 公钥（Base64 编码 X.509 DER），若配置则优先使用 RS256；留空则使用 HS256
+  public-key-base64: ${JWT_PUBLIC_KEY_BASE64:}
+  # JWT Claims 字段名（与网关签发侧约定保持一致）
+  claim:
+    user-id:   ${JWT_CLAIM_USER_ID:userId}
+    dept-code: ${JWT_CLAIM_DEPT_CODE:deptCode}
+    app-code:  ${JWT_CLAIM_APP_CODE:appCode}
+
+# ─── 外部机构/用户/权限系统对接配置 ──────────────────────────────────────────
+external:
+  org:
+    api:
+      # 外部机构管理系统部门树接口（返回 JSON 数组，元素含 deptCode/name/parentCode）
+      # 留空则使用内置测试数据（dev-mode=true 时）
+      dept-tree-url: ${EXT_ORG_DEPT_TREE_URL:}
+      # 调用外部接口的凭证（Bearer Token 或 API Key），留空则不带认证头
+      token: ${EXT_ORG_API_TOKEN:}
+    # 开发模式：true=使用内置测试部门树，false=调用外部接口
+    dev-mode: ${EXT_ORG_DEV_MODE:true}
+    # 是否启用定时同步
+    sync:
+      enabled: ${EXT_ORG_SYNC_ENABLED:true}
+    # 定时同步 Cron（默认每小时整点）
+    sync-cron: ${EXT_ORG_SYNC_CRON:0 0 * * * ?}
+
+# ─── 操作日志配置 ─────────────────────────────────────────────────────────
+log:
+  operation:
+    # 响应体快照最大字节数（超出时截断并追加 [truncated] 标记）
+    response-max-bytes: ${LOG_OP_RESPONSE_MAX_BYTES:4096}
+    # 请求入参快照最大字节数
+    request-max-bytes: ${LOG_OP_REQUEST_MAX_BYTES:2048}
+    # 操作日志异步写入线程池大小（与搜索线程池完全隔离）
+    async-pool-size: ${LOG_OP_ASYNC_POOL_SIZE:3}
+
+# ─── 日志文件输出配置 ──────────────────────────────────────────────────────
+# 运行日志统一输出到 java_service/logs/ 目录（无论本地还是容器均有效）
+# 容器部署时可通过环境变量 LOG_FILE_PATH 覆盖为 /app/logs
+logging:
+  file:
+    # 日志文件路径：相对于 mvn spring-boot:run 启动目录（java_service/）
+    name: ${LOG_FILE_PATH:logs}/java_service.log
+  logback:
+    rollingpolicy:
+      # 按大小+时间双策略滚动：超过 50MB 或每天自动分割
+      max-file-size: 50MB
+      # 保留最近 7 天的历史日志文件
+      max-history: 7
+      # 所有日志文件总大小上限，防止磁盘爆满
+      total-size-cap: 500MB
+  # 生产环境建议调整为 warn，减少无效日志量
+  level:
+    root: ${LOG_LEVEL_ROOT:info}
+    com.boyang: ${LOG_LEVEL_APP:debug}

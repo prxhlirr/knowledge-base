@@ -1,0 +1,29 @@
+# 向量搜索中台 - 任务分解与执行清单 (MVP)
+
+> 基于用户补充的规范：JDK 1.8, SpringBoot 2.3.5.RELEASE, Python 3.10+, ES 8.6.2, PgSQL 14.8，文件支持 txt/doc/docx/pdf 设计。
+
+## 0. 环境与中间件准备
+- [x] 0.1 修改 [docker-compose.yml](file:///e:/project/AI/knowledge-base/docker-compose.yml)，补齐 Elasticsearch 8.6.2、Kibana、Redis、PostgreSQL 14.8 等基础容器运行环境
+- [/] 0.2 测试各个容器环境启动连接无误
+
+## 1. 核心 AI 引擎通道构建 (Python 3.10+ & FastAPI)
+- [ ] 1.1 搭建 FastAPI 服务基础骨架及项目目录
+- [ ] 1.2 配置 BGE-m3 模型本地 FP16 加载模块 (`FlagEmbedding` 或 `sentence-transformers`)
+- [ ] 1.3 建立 `ParserFactory` 以及对应文件读取器 (支持 txt, doc/docx, pdf，并通过抽象定义为后续的多模态图片/视频/音频预留插槽)
+- [ ] 1.4 实现核心切片逻辑：基于 LangChain 滑动窗口结合基础公文格式的文本智能分段 (Text Splitter)
+- [ ] 1.5 编写核心接口：提供 HTTP API `/api/ai/vector/query` 给 Java 调用获取独立 Query Vector
+- [ ] 1.6 **(可选后置)** 当 Java 层异步功能完成时，接入 Python 的 Kafka 队列消费者逻辑
+
+## 2. ES 索引与向量化数据操作层 (Vector Store)
+- [ ] 2.1 基于 Python 实现 Elasticsearch 8.6.2 中的索引映射（Mapping）预建立 (`gov_doc_vector_v1`)，开通 Dense Vector 及 HNSW 支持
+- [ ] 2.2 定义统筹的向量数据入口接口 (`VectorStore`)，支持后期通过扩展快速适配独立外部向量数据库
+- [ ] 2.3 实现批处理上传写入逻辑，对接步骤 1.4 产生的切片流落盘至 ES
+
+## 3. 业务网关与管控层骨架 (Spring Boot 2.3.5.RELEASE + JDK 1.8)
+- [ ] 3.1 基于 Spring Boot 2.3.5 新建项目根工程，注入 MyBatis-Plus 及 PostgreSQL 14.8 驱动依赖包
+- [ ] 3.2 准备基于 RRF（倒数混合重排序）的 Elasticsearch High Level API 或 Rest Client 查询封装，执行 "kNN + BM25" 双路联合
+- [ ] 3.3 补齐基础控制器 (`Controllers`)：接收搜索请求参数与业务数据拼装等
+
+## 4. 联调验证
+- [ ] 4.1 发送文本至 Python API 获取向量，再调用 Java API 查询 ES 以确认全链路贯通
+- [ ] 4.2 通过编写自动化单页脚本对关键边缘条件（包含但不限于生僻字符、多级别长文档读取等）进行边界验证

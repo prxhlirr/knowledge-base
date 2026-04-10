@@ -1,0 +1,37 @@
+﻿{
+  "success": true,
+  "message": "",
+  "code": 200,
+  "result": {
+    "id": "698107103444729856",
+    "name": "{{orgName}}",
+    "nameAbbr": "Mock Dept",
+    "orgCode": "{{orgCode}}",
+    "pCode": null,
+    "pId": null,
+    "px": 0,
+    "children": [
+      {
+        "id": "698107423277187072",
+        "name": "Mock Sub Department A",
+        "nameAbbr": "Sub Dept A",
+        "orgCode": "620000040001",
+        "pCode": "{{orgCode}}",
+        "pId": "698107103444729856",
+        "px": 1,
+        "children": []
+      },
+      {
+        "id": "698107423277187073",
+        "name": "Mock Sub Department B",
+        "nameAbbr": "Sub Dept B",
+        "orgCode": "620000040002",
+        "pCode": "{{orgCode}}",
+        "pId": "698107103444729856",
+        "px": 2,
+        "children": []
+      }
+    ]
+  },
+  "timestamp": "{{timestamp}}"
+}

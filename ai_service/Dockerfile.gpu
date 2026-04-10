@@ -1,0 +1,86 @@
+# ── AI Service GPU 生产版 Dockerfile ─────────────────────────────────────────
+# 用途：Linux 生产服务器部署（需 NVIDIA GPU + nvidia-container-toolkit）
+# 区别于开发版 Dockerfile（python:3.10-slim）：
+#   本文件使用 NVIDIA CUDA 官方基础镜像，包含 onnxruntime-gpu 所需的全部系统库：
+#   - libcublasLt.so.12（cuBLAS，原始根因）
+#   - libcudnn.so.9   （cuDNN）
+#   - libcudart.so.12 （CUDA Runtime）
+#
+# 构建命令：docker build -f Dockerfile.gpu -t knowledge-base-ai:gpu .
+# 部署命令：修改 docker-compose.yml image 字段为 knowledge-base-ai:gpu
+FROM nvidia/cuda:12.4.1-cudnn9-runtime-ubuntu22.04
+
+LABEL maintainer="boyang" \
+      app="knowledge-base-ai-service-gpu" \
+      version="1.0.0"
+
+# ── 系统依赖 + Python 3.10 ────────────────────────────────────────────────────
+# NVIDIA CUDA 基础镜像基于 Ubuntu 22.04，不含 Python，需手动安装。
+# Ubuntu 22.04 默认仓库提供 python3.10。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3-pip \
+    python3.10-dev \
+    libgomp1 \
+    libmagic1 \
+    antiword \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
+    && pip3 install --upgrade pip --quiet \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 创建非 root 用户 ──────────────────────────────────────────────────────────
+RUN useradd -m -u 1000 appuser
+
+# ── 工作目录 ──────────────────────────────────────────────────────────────────
+WORKDIR /app
+
+# ── Python 依赖（离线安装）───────────────────────────────────────────────────
+# ai-lib 目录包含所有 whl 包；onnxruntime_gpu-1.20.1 需系统 CUDA 库（本镜像已提供）
+COPY ai-lib/ /app/ai-lib/
+
+# 确保跳过 onnxruntime（CPU版），只安装 onnxruntime-gpu
+RUN pip3 install --no-index --find-links=/app/ai-lib \
+    --no-deps \
+    --ignore-installed \
+    $(ls /app/ai-lib/*.whl | grep -v "^onnxruntime-[0-9]" | xargs) \
+    2>/dev/null || true
+
+# 先安装非 GPU 版 onnxruntime（基础依赖）再安装 GPU 版（覆盖）
+RUN pip3 install --no-index --find-links=/app/ai-lib \
+    onnxruntime==1.16.3 2>/dev/null || true
+
+RUN pip3 install --no-index --find-links=/app/ai-lib \
+    "onnxruntime_gpu-1.20.1-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" \
+    2>/dev/null || pip3 install --no-index --find-links=/app/ai-lib onnxruntime_gpu
+
+# ── 复制应用代码 ──────────────────────────────────────────────────────────────
+COPY main.py task_worker.py .env* ./
+COPY core/ ./core/
+COPY scripts/ ./scripts/
+
+# ── 复制 ONNX 模型和分词器 ────────────────────────────────────────────────────
+# 注意：models 目录通过 docker-compose volumes 挂载，此处仅创建挂载点
+RUN mkdir -p /app/models
+
+# ── 设置环境变量 ──────────────────────────────────────────────────────────────
+ENV PYTHONPATH=/app \
+    PYTHONIOENCODING=utf-8 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    # CUDA 运行时环境（由基础镜像提供，无需额外配置）
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# ── 权限设置 ──────────────────────────────────────────────────────────────────
+RUN chown -R appuser:appuser /app
+USER appuser
+
+# ── 健康检查 ──────────────────────────────────────────────────────────────────
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/ai/health')" || exit 1
+
+EXPOSE 8001
+
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", \
+     "--workers", "1", "--loop", "asyncio"]

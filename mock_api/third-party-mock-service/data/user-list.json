@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "message": "",
+  "code": 200,
+  "result": [
+    { "id": "{{randomId}}", "username": "620102199509275310", "realname": "张三", "avatar": "", "sex": 1, "phone": "13800138001", "orgCode": "620000040000", "status": 1, "delFlag": 0, "workNo": "001001", "identity": "1", "lastLoginTime": "{{datetime}}", "accountId": "165607", "xfjz": false },
+    { "id": "{{randomId}}", "username": "620102199812150021", "realname": "李四", "avatar": "", "sex": 2, "phone": "13800138002", "orgCode": "620000040000", "status": 1, "delFlag": 0, "workNo": "001002", "identity": "1", "lastLoginTime": "{{datetime}}", "accountId": "165608", "xfjz": false }
+  ],
+  "timestamp": "{{timestamp}}"
+}

@@ -1,0 +1,12 @@
+{
+  "success": true, "message": "", "code": 200,
+  "result": [
+    { "code": "gzgw", "children": [
+      { "code": "0100", "children": [
+        { "code": "010001", "name": "岗位A", "id": "{{randomId}}", "lx": "0", "parentId": "" },
+        { "code": "010002", "name": "岗位B", "id": "{{randomId}}", "lx": "0", "parentId": "" }
+      ], "name": "一级分类", "id": "{{randomId}}", "lx": "0", "parentId": "" }
+    ], "name": "工作岗位", "id": "{{randomId}}", "lx": "0", "parentId": "ROOT" }
+  ],
+  "timestamp": "{{timestamp}}"
+}

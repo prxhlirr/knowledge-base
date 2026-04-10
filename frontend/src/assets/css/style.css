@@ -1,0 +1,106 @@
+/* Snowy Minimalist 风格设计系统 - 纯净、通透、高效 */
+:root {
+  /* 基础颜色体系 */
+  --snow-bg: #FFFFFF;
+  --snow-soft: #FBFBFC;
+  --text-main: #1F2937; 
+  --text-muted: #6B7280;
+  --text-light: #9CA3AF;
+  
+  /* 品牌核心色域 (Primary Blue Ecosystem) */
+  --primary-blue: #1A56DB;
+  --primary: #1A56DB; 
+  --primary-hover: #1E40AF;
+  --accent-blue: #1A56DB; 
+  --accent-soft: rgba(26, 86, 219, 0.04);
+  
+  /* 边框体系 */
+  --border-ultra-light: rgba(0, 0, 0, 0.03);
+  --border-light: rgba(0, 0, 0, 0.05);
+
+  /* Glassmorphism 专业毛玻璃体系 */
+  --glass-bg: rgba(255, 255, 255, 0.75);
+  --glass-blur: 16px;
+  --glass-border: rgba(255, 255, 255, 0.6);
+  --glass-shadow: 0 4px 24px -2px rgba(0, 5, 20, 0.03), inset 0 0 0 1px rgba(255, 255, 255, 0.8);
+  
+  /* 柔和漫反射阴影体系 (Flat UI 高级悬浮投影) */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.02);
+  --shadow-md: 0 4px 12px -2px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.03), 0 8px 10px -6px rgba(0, 0, 0, 0.02);
+  --shadow-xl: 0 25px 50px -12px rgba(0, 0, 0, 0.08);
+  --shadow-soft: 0 8px 32px rgba(0, 0, 0, 0.04);
+  --shadow-hover: 0 14px 28px rgba(0, 0, 0, 0.06), 0 10px 10px rgba(0, 0, 0, 0.03);
+  --shadow-glow: 0 0 0 4px rgba(26, 86, 219, 0.1), 0 8px 20px rgba(26, 86, 219, 0.08); /* 搜索框专注时的发光呼吸阴影 */
+  
+  /* 动画缓动曲线体系 */
+  --transition-smooth: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-fast: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-bezier: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100vh;
+  background-color: var(--snow-soft);
+  color: var(--text-main);
+  /* 使用现代排印标准：字怀开阔、线条利落 */
+  font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  box-sizing: border-box;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: inherit;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  outline: none;
+  font-family: inherit;
+}
+
+/* 顶部导航与 Admin 路由入口 */
+.app-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 64px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 0 32px;
+  z-index: 100;
+  /* 没有任何边框与背景色，融于极浅背景之中 */
+}
+
+.btn-admin {
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 500;
+  padding: 10px 20px;
+  border-radius: 8px;
+  transition: var(--transition-bezier);
+}
+
+.btn-admin:hover {
+  background: rgba(95, 99, 104, 0.08);
+  color: var(--text-main);
+}

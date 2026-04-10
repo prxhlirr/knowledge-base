@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────
+# 知识库项目 .gitignore
+# ─────────────────────────────────────────────────────────────
+
+# ═══ 大体积二进制文件（Docker 镜像、归档包）═══
+*.tar
+*.tar.gz
+*.zip
+*.gz
+
+# ═══ 运行时日志（各子服务 logs/ 目录保留占位，日志本身不提交）═══
+*.log
+*.log.*
+logs/
+!logs/.gitkeep
+
+# ═══ 临时/测试输出文件 ═══
+*.txt
+!question.md
+temp_zip/
+temp_test_tar/
+
+# ═══ Python AI 服务 ═══
+ai_service/venv/
+ai_service/__pycache__/
+ai_service/**/__pycache__/
+ai_service/.pytest_cache/
+ai_service/**/.pytest_cache/
+# AI 模型文件（体积巨大，通过独立渠道分发）
+models/
+ai_service/ai-lib/
+
+# ═══ Java 服务 ═══
+java_service/target/
+java_service/.idea/
+java_service/*.class
+java_service/java-lib/
+java_service/java-lib.zip
+# JVM 崩溃报告
+hs_err_pid*.log
+replay_pid*.log
+
+# ═══ 前端服务 ═══
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ═══ 环境变量 / 密钥（绝不提交明文密钥）═══
+.env
+.env.local
+.env.production
+ai_service/.env
+ai_service/.env.docker
+frontend/.env
+# 保留示例文件，供新成员参考配置项
+!.env.example
+!ai_service/.env.example
+
+# ═══ 离线部署包（体积极大，走独立渠道分发）═══
+offline-pkgs/
+offline-pkgs.zip
+
+# ═══ IDE / 编辑器 ═══
+.vscode/
+.idea/
+*.iml
+
+# ═══ 操作系统产物 ═══
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ═══ 测试/调试临时文件 ═══
+uploads/
+test_docs/

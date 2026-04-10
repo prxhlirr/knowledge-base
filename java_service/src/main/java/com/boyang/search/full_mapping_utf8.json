@@ -1,0 +1,96 @@
+{
+    "kb_document_v1":  {
+                           "mappings":  {
+                                            "properties":  {
+                                                               "content":  {
+                                                                               "type":  "text",
+                                                                               "fields":  {
+                                                                                              "keyword":  {
+                                                                                                              "type":  "keyword",
+                                                                                                              "ignore_above":  256
+                                                                                                          }
+                                                                                          },
+                                                                               "analyzer":  "ik_max_word"
+                                                                           },
+                                                               "data_source":  {
+                                                                                   "type":  "keyword"
+                                                                               },
+                                                               "doc_title":  {
+                                                                                 "type":  "text",
+                                                                                 "fields":  {
+                                                                                                "keyword":  {
+                                                                                                                "type":  "keyword"
+                                                                                                            }
+                                                                                            },
+                                                                                 "analyzer":  "ik_max_word"
+                                                                             },
+                                                               "metadata":  {
+                                                                                "properties":  {
+                                                                                                   "chunk_id":  {
+                                                                                                                    "type":  "long"
+                                                                                                                },
+                                                                                                   "data_source":  {
+                                                                                                                       "type":  "text",
+                                                                                                                       "fields":  {
+                                                                                                                                      "keyword":  {
+                                                                                                                                                      "type":  "keyword",
+                                                                                                                                                      "ignore_above":  256
+                                                                                                                                                  }
+                                                                                                                                  }
+                                                                                                                   },
+                                                                                                   "owner_dept_id":  {
+                                                                                                                         "type":  "text",
+                                                                                                                         "fields":  {
+                                                                                                                                        "keyword":  {
+                                                                                                                                                        "type":  "keyword",
+                                                                                                                                                        "ignore_above":  256
+                                                                                                                                                    }
+                                                                                                                                    }
+                                                                                                                     },
+                                                                                                   "security_level":  {
+                                                                                                                          "type":  "long"
+                                                                                                                      },
+                                                                                                   "source":  {
+                                                                                                                  "type":  "text",
+                                                                                                                  "fields":  {
+                                                                                                                                 "keyword":  {
+                                                                                                                                                 "type":  "keyword",
+                                                                                                                                                 "ignore_above":  256
+                                                                                                                                             }
+                                                                                                                             }
+                                                                                                              },
+                                                                                                   "visible_depts":  {
+                                                                                                                         "type":  "text",
+                                                                                                                         "fields":  {
+                                                                                                                                        "keyword":  {
+                                                                                                                                                        "type":  "keyword",
+                                                                                                                                                        "ignore_above":  256
+                                                                                                                                                    }
+                                                                                                                                    }
+                                                                                                                     }
+                                                                                               }
+                                                                            },
+                                                               "owner_dept_id":  {
+                                                                                     "type":  "keyword"
+                                                                                 },
+                                                               "security_level":  {
+                                                                                      "type":  "integer"
+                                                                                  },
+                                                               "vector":  {
+                                                                              "type":  "dense_vector",
+                                                                              "dims":  1024,
+                                                                              "index":  true,
+                                                                              "similarity":  "cosine",
+                                                                              "index_options":  {
+                                                                                                    "type":  "hnsw",
+                                                                                                    "m":  16,
+                                                                                                    "ef_construction":  100
+                                                                                                }
+                                                                          },
+                                                               "visible_depts":  {
+                                                                                     "type":  "keyword"
+                                                                                 }
+                                                           }
+                                        }
+                       }
+}

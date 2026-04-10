@@ -1,0 +1,62 @@
+# RAG 检索权限重构代码落地实施计划
+
+依据正式定稿的 [文档检索权限架构规范(V2)](file:///e:/project/AI/knowledge-base/docs/doc_retrieval_permission_spec.md)，以下是将理论架构转化为 `java_service` 和 `ES` 实际代码链路的**全盘重构步骤**。
+
+> [!NOTE]
+> **已确认的边界与架构准则**
+> 1. **第三方 IAM 对接模式**：前端在 Header 传 Token -> 后端 `JwtAuthInterceptor` 拦截提取 -> 后台凭此 Token 调用第三方 API -> 解析返回值的 `userInfo`。
+> 2. **数据字典映射**：
+>    - 身份证 -> `certNo` / 姓名 -> `name`
+>    - 部门编码 -> `orgCode` / 部门名称 -> `orgName`
+>    - 角色编码 -> `roleCode` / 角色名称 -> `roleName`
+> 3. **迭代排期**：极度复杂的人员脱敏孪生分片（Twin Chunks）防御机制拔出第一期，延后至**第二阶段**开展。本期专注核心底座（ACL 扁平化重构）。
+
+## Proposed Changes
+
+本次改造将沿着整条 RAG 处理管道（Pipeline），按自底向上的顺序推进：
+
+### 1. 基础设施层 (Infrastructure)
+* **[MODIFY] Database & ES Mappings (解析与调整)**
+  - **现有 Mapping 不合理之处**：当前的 `full_mapping_utf8.json` 中，权限控制依旧依赖于 `owner_dept_id`, `security_level`, `visible_depts` 这些被分散和硬编码的字段，这导致 ES 查询时必须用复杂的 `bool` 组合。
+  - **本次调整动作**：
+    1. 在 ES Mapping 的根级（或 `metadata` 中）新增单一字段 `"acl_tokens": { "type": "keyword" }`。
+    2. 原有的 `owner_dept_id` / `visible_depts` 理论上可以**废弃**（不再参与任何搜索过滤，即使保留也纯粹用于前端显示）。
+
+### 2. 身份解析层 (Gateway & Context)
+* **[NEW] `com.boyang.search.security.UserContext` & `UserContextHolder`**
+  - 构建线程局部变量（ThreadLocal），包含：`userId`, `deptCode`, `roles`, 以及拉平展开后的核心属性：`Set<String> aclTokens`。
+* **[MODIFY] `com.boyang.search.security.JwtAuthInterceptor`**
+  - **核心重构**：拦截用户请求 -> 提取 JWT -> 调第三方接口（或通过本地已完成的网关转发） -> 根据 MySQL/第三方计算：生成诸如 `["_PUBLIC", "DEPT:信息中心", "USER:1024", "_SUPER_ADMIN"]` 的身份票据。
+  - 将此票据塞入 `UserContext` 供全线程享用。
+
+### 3. 写机制重构 (Ingestion Write Path)
+* **[MODIFY] `com.boyang.search.service.DocIngestService` / `Python` 落盘管道**
+  - 重写装载逻辑（在文件分割为 Chunk 并上传至 ES 之前）。
+  - 读取 MySQL 中 `kb_doc_registry` 以及 `kb_doc_grants` 的状态，为每一批 Chunk 生成对应的 `acl_tokens` 集合写入 ES。摒弃老式的 `metadata.visibility` 注入方式。
+
+### 4. 读检索重构 (Retrieval Read Path) [大手术]
+* **[MODIFY] `com.boyang.search.pipeline.steps.EsRecallStep`**
+  - **移除**所有现有的 `metadata.visibility`, `metadata.dept_code_full` 等基于 `if/else`, `should/must` 的嵌套 DSL（包括 Pre-Flight 短路逻辑 和 KNN KNN/BM25 查询）。
+  - **新增**一行极限性能位图过滤条件逻辑：`filter.terms("acl_tokens", UserContextHolder.get().getAclTokens())`。
+  - 增补超管（RBAC Bypass）判定分支。
+
+### 5. 内存兜底重构 (Post-Filter Safety Net)
+* **[MODIFY] `com.boyang.search.service.SearchServiceV2`** (或 `RerankStep` 前置)
+  - 在最终检索出 Top K Chunk 并进入 LLM 等待发出的组装阶段前，加入强制性后置轮询：`PermissionGuard.canAccess(chunk.docId, UserContextHolder.get())`。
+
+### 6. 存量资产洗数脚本 (Zero-Embedding Migration Script)
+* **[NEW] `com.boyang.search.job.DocAclMigrationJob`**
+  - 提供一条运维级 API `/api/admin/system/migrate/acl-tokens`。
+  - 核心逻辑：从 `kb_doc_registry` 中查出历史 3 万篇有效文档 -> 计算新版 Tag -> 拼装 ES `_update_by_query` 脚本 -> 脱离 GPU 和大模型，通过纯文本覆盖在秒级完成 3 万份 ES 历史分块标签的挂载。
+
+## 落地确认清单
+
+以上实施细节已经基于我们的讨论全部锁定。没有任何阻塞项。
+
+### Automated Tests
+- [ ] 编写全套单元测试 `EsAclContextBuilderTest.java` 验证身份生成逻辑能否 100% 正确映射标签。
+- [ ] Mocker 数据测试：在 ES 写入 10 篇带有各自特殊标签的文档，模拟 3 个不同权限人员（普通/隔离/超管）进行检索验证是否不越权。
+
+### Manual Verification
+1. [ ] 后台发起调用 `/api/admin/system/migrate/acl-tokens` 看存量大库是否无损刷通。
+2. [ ] 执行带有一个私有权限词的文档查询，验证结果在搜索栏中是否正常实现“非关联隐身”（防穿透效果检测）。

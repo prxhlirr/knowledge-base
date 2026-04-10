@@ -1,0 +1,15 @@
+# 排除所有大型压缩包，防止 Docker 构建上下文超载
+*.tar
+*.zip
+*.log
+# 开发工具
+venv/
+__pycache__/
+*.pyc
+.env
+# 旧版 Dockerfile
+Dockerfile.gpu
+# 开发测试目录
+tools_and_tests/
+# 构建产物日志
+build_lo.log

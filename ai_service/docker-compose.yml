@@ -1,0 +1,108 @@
+version: '3.8'
+
+services:
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    container_name: kb-gotenberg
+    ports:
+      - "3000:3000"
+    command:
+      - "gotenberg"
+      - "--api-port=3000"
+    restart: always
+
+  knowledge-base-ai:
+    image: knowledge-base-ai:1.0.0
+    container_name: ai-service
+    # 强制使用 nvidia runtime，确保 GPU 透传生效
+    # 根因：deploy.resources.reservations.devices 在部分 Docker 版本不自动切换 runtime
+    runtime: nvidia
+    ports:
+      - "8001:8001"
+    volumes:
+      # 将宿主机的模型目录挂载进容器的约定基准路径
+      - ../models:/app/models
+      # 【热更新挂载】直接挂载宿主机的 python 代码进去，告别每次改完 Python 都要打镜像的深坑！
+      - ../scripts:/app/scripts
+      - ../ai_service/core:/app/core
+      - ../ai_service/task_worker.py:/app/task_worker.py
+      - ../ai_service/main.py:/app/main.py
+      # [GPU 轻量方案恢复] 挂载宿主机 CUDA toolkit（含 libcublas等），容器内自带 cuDNN wheel
+      - type: bind
+        source: /usr/local/cuda-12.4/targets/x86_64-linux/lib
+        target: /usr/local/cuda-12.4/targets/x86_64-linux/lib
+        read_only: true
+    # 这里通过环境变量将所有底层配置接管（可按需修改成生产环境真值）
+    # 当你不填这些时，它会自动使用容器化回退值如 redis 或 http://elasticsearch:9200
+    environment:
+      - REDIS_HOST=192.168.74.1
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      
+      - ES_HOST=http://192.168.74.1:9200
+      - ES_USER=admin
+      - ES_PASS=8732391
+      
+      - JAVA_SERVICE_HOST=http://192.168.74.1:8080
+      - JAVA_API_BASE=http://192.168.74.1:8080/api/v1
+      
+      - LLM_API_URL=http://192.168.74.1:11434/v1/chat/completions
+      - LLM_MODEL=qwen2.5:7b
+      
+      # PostgreSQL 连接（供操作日志写库使用）
+      - PG_HOST=host.docker.internal
+      - PG_PORT=5432
+      - PG_DB=knowledge_base
+      - PG_USER=postgres
+      - PG_PASSWORD=liyz
+
+      
+      # 映射后的容器内底层模型路径，保持与 volumes 内部路径绝对匹配
+      - MODEL_BASE_PATH=/app/models/onnx_native
+      
+      # 防御系统 HTTP 代理劫持（Clash/V2Ray等）导致 400 Bad Request
+      - NO_PROXY=192.168.74.1,localhost,127.0.0.1,*
+      - no_proxy=192.168.74.1,localhost,127.0.0.1,*
+      
+      # 核心跨容器通信鉴权密码
+      - KB_INTERNAL_TOKEN=kb-dev-token-change-me-in-prod
+      # Gotenberg 文档转换微服务地址
+      - GOTENBERG_URL=http://gotenberg:3000
+      # [编码修复] 强制 Python stdout/stderr 使用 UTF-8，防止 docker logs 在 GBK 终端显示乱码
+      - PYTHONIOENCODING=utf-8
+      # 使用 C.UTF-8 而非 zh_CN.UTF-8：
+      # 根因：python:3.10-slim 未安装 locales 包，zh_CN.UTF-8 locale 不存在，
+      #   antiword 调用时检查 LC_ALL/LANG，找不到对应 locale 即报 "cannot set the utf-8 locale"。
+      # C.UTF-8 是 glibc 内置的 POSIX UTF-8 locale，任何 Linux 容器均可用，antiword 可正常识别。
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      # [GPU] nvidia-container-toolkit 自动注入 /usr/local/nvidia/lib64（驱动库）
+      # cuBLAS 由 bind mount 供给，cuDNN 由 pip 供给。统一配置进路径：
+      - LD_LIBRARY_PATH=/usr/local/cuda-12.4/targets/x86_64-linux/lib:/usr/local/lib/python3.10/site-packages/nvidia/cudnn/lib:/usr/local/nvidia/lib64:/usr/local/nvidia/lib
+      # [Fix-3] GPU 编码加速：ORT_CUDA_DEVICE_ID 指定 GPU 设备编号（单卡填 0）
+      - ORT_CUDA_DEVICE_ID=0
+    restart: always
+    # [修复] 同时启动 HTTP 服务（uvicorn）和 Redis 消费者（task_worker.py）
+    # 根因：原 Dockerfile CMD 只启动了 uvicorn，task_worker.py 从未运行，
+    #       导致 Redis 队列里积压的任务无人消费，文档上传后永远不进行解析/分片/入库。
+    command: >
+      bash -c "
+        python -m uvicorn main:app --host 0.0.0.0 --port 8001 --workers 1
+      "
+    # [Fix-3] NVIDIA GPU 透传 —— 缺少此配置导致 CUDAExecutionProvider 不可用，退化为 CPU 编码（~4s/query）
+    # 需要宿主机已安装 NVIDIA Container Toolkit（nvidia-docker2 或 nvidia-ctk）
+    # 验证命令：docker exec ai-service python -c "import onnxruntime; print(onnxruntime.get_available_providers())"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+# 注：如果你的 redis 与 es 也在同一个 docker-compose 网络（如 elastic），
+# 你可以在这里加入 networks，并将环境变量的 IP 直接改为容器别名。
+
+# 验证 GPU 是否生效（容器启动后执行）：
+# docker logs ai-service 2>&1 | grep "实际运行设备\|CUDAExecutionProvider"
+

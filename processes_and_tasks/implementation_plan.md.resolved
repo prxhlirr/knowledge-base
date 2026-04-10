@@ -1,0 +1,49 @@
+# 向量搜索中台 - 架构与技术选型方案
+
+基于 `requirements` 目录下的多份需求文档（MVP_PRD.md、文档接入.md、混合检索.md、权限控制.md、语义分片.md、向量化模块.md、数据一致性.md、管控后台.md及v1.md），结合现有基础，梳理出如下架构与技术选型方案。
+
+## 1. 整体架构设计 (混合架构)
+
+系统采用 **Java 业务主导 + Python AI 计算 + 消息队列异步解耦** 的微服务混合架构。
+
+### 1.1 核心分层
+*   **接入与业务层 (Java/Spring Boot)**：负责对接现有政务系统，提供鉴权、权限过滤、业务接口（检索、批量导入任务提交），并对检索结果进行最终的拼装与脱敏处理。
+*   **消息缓冲层 (Kafka)**：主要用于**文档向量化入库更新**及**权限变更**的异步削峰解耦，确保哪怕千万量级的历史文档导入，或者高并发场景下，都能平滑消化，不拖垮系统。
+*   **AI 计算层 (Python/FastAPI)**：专职承担 CPU/GPU 密集型任务，包括多格式文档解析、政务特色语义分片、长文本清洗，以及调用 BGE-m3 模型执行向量化（FP16量化）。
+*   **检索与数据存储层**：利用 Elasticsearch 8.6 提供原生的 “BM25 + kNN 向量” 混合检索与过滤能力；使用 MySQL/PGsql 落盘持久化审核、任务状态和系统日志；利用 Redis 加速向量重检与权限透传。
+
+## 2. 核心技术选型 (Technology Stack)
+
+| 模块类别 | 技术选型 | 选择理由及政务适配策略 |
+| :--- | :--- | :--- |
+| **应用框架(Java)** | **Spring Boot 2.3.5.RELEASE + JDK 1.8 + MyBatis-Plus** | 生态成熟，完美对接现有系统的 Java 栈，易于通过过滤器/AOP做统一的 Token 拦截与细粒度的数据越权防护。 |
+| **应用框架(Python)** | **Python 3.10+ & FastAPI** | 纯异步、高性能，适合包裹 PyTorch/Sentence-Transformers 供内部微服务调用，自带 Swagger 易于联调。 |
+| **核心检索引擎** | **Elasticsearch 8.6.2** | 统一承载词频检索(BM25)与基于 HNSW 算法的向量检索(kNN)，并且支持 `rank: {rrf: {}}` 倒数混合重排。**预留扩展接口策略：**架构设计上通过接口抽象(VectorStore API)解耦向量底层，后期可无缝接入独立向量数据库。 |
+| **文档解析库** | `python-docx` / `pdfplumber` | **一期支持格式：** txt, word(.doc, .docx), PDF(.pdf) 提取核心文本特征。<br>**扩展入口预留：** 解析工厂模式设计(Parser Factory)，为后期的图片/视频/音频多模态解析预留实现插槽。 |
+| **切片策略(Chunking)** | 规则优先(正则)+LangChain `RecursiveCharacterTextSplitter` | 政务公文结构化极强，优先按“标题一、(二)、3.”级别和段落硬拆切片；长无结构文本选用滑动窗口兜底，并增加50字 overlapping 保证语义粘连。 |
+| **特征提取模型** | **BGE-m3** (FP16量化加载) | BAAI开源的最强多语言模型，支持超长上下文，支持稀疏/稠密多路表征。在 Python 服务内显式使用 FP16 半精度加载 (`transformers` + CUDA) ，大幅节约 GPU 显存，提高推理速度。 |
+| **状态与持久化** | **PostgreSQL 14.8** | 核心业务与任务状态存储。用来记录文档导入 Batch 的全生命周期状态机，记录每一次检索查询留底（Audit Log）和 Bad Case 溯源反馈。 |
+| **缓存层** | **Redis** | 对频繁查询词的 Query Vector 缓存、高频文档检索结果及权限体系树做短期缓存，保证检索层响应 < 1s。 |
+| **运行调度** | **Docker Compose / K8s** | [docker-compose.yml](file:///e:/project/AI/knowledge-base/docker-compose.yml) 现已初具雏形，Python AI 服务可绑定 GPU 节点编排，Java 服务横向扩展。 |
+
+## 3. 核心机制保障 (关键点突破)
+
+### 3.1 检索准确率 (检索准、数据准)
+*   **RRF混合重排**：结合全文搜的精确度（尤其针对文号如“国发〔2024〕1号”）与向量搜的泛化度（同义语义），彻底摆脱词法受限的问题。
+*   **多维元数据硬过滤**：ES 查询中叠加业务属性条件（下发单位、起草时间）强 Filter。
+
+### 3.2 权责安全管控 (权限严)
+*   建立**行级+Chunk级**视图。在 Java 侧实时注入 ES `bool -> filter -> should` 嵌套条件链，校验创建者、参与者、指定下发下级可见等标签。
+*   **检索结果脱敏与原文防护**：没有下载/查看全文权限的用户仅供查阅匹配结果的高亮摘要；跳转“查看原文”动作再次过权限网关强校验。
+
+### 3.3 数据强一致与防重 (运维稳)
+*   **假删防串**：ES 数据生命周期基于 `is_latest: true` 与 `doc_status` 做逻辑多版本隔离。同一文档修订时做原子切换更新，失效版本定期在夜间触发真实 Delete 物理清理。
+*   **对账补偿**：定时全量核对主数据库文档数与 ES 活动 Doc 数量差异，发现断层自动打入 Kafka 的死信重制队列进行自动修复。
+
+## 4. 下一步拆接任务计划建议
+
+若本架构方向确认无误，下一步我们将把实施阶段分为几个关键的小步并录入 Task Checklist：
+1. **基础设施与结构建立**：改造 [docker-compose.yml](file:///e:/project/AI/knowledge-base/docker-compose.yml) 引入 Redis / Kafka / MySQL; 初始化 ES `gov_doc_vector_v1` Index Schema 与 Mappings 分析器。
+2. **Python AI 层核心重构**：将现有的 [rag_pipeline.py](file:///e:/project/AI/knowledge-base/scripts/rag_pipeline.py)（单机脚本串行模式）重构为稳定的 FastAPI 服务态；接入 Kafka 消费逻辑及 FP16 模型加载、重写更精细的按公文级语义切片算法模块。
+3. **Java 业务检索 API 层开发**：利用 Spring Boot 开发 `token` 同步、组装 ES RRF 查询 DSL、重构基于 `doc_id` 过滤权限体系的检索核心逻辑。
+4. **管控对账层开发**：基于 PostgreSQL 14.8 表实现异步任务队列的数据库兜底及数据对账补偿脚本逻辑。
