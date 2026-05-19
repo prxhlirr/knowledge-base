@@ -1,0 +1,155 @@
+version: '3.8'
+
+# =====================================================================
+# Knowledge Base System - 离线环境多容器编排总谱 (All-in-One)
+# =====================================================================
+
+services:
+
+  # ────────── 前端交互网关 (Vue + Nginx) ──────────
+  knowledge-base-frontend:
+    image: knowledge-base-frontend:1.0.0
+    container_name: frontend-web
+    ports:
+      - "80:80"        # 暴露的 Web 访问端口
+    restart: always
+
+  # ────────── 核心中枢服务 (Java Spring Boot) ──────────
+  knowledge-base-java:
+    image: knowledge-base-java:1.0.0
+    container_name: kb-java
+    ports:
+      - "8080:8080"
+    volumes:
+      # 挂载临时文件和日志
+      - ./uploads:/app/uploads
+    environment:
+      # 【启动最高优先级容器专用 Profile】
+      - SPRING_PROFILES_ACTIVE=prod
+      
+      # 核心中间件连接覆盖（对接下方的基础网络别名）
+      - POSTGRES_HOST=database_pg
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=liyz
+      - POSTGRES_DB=knowledge_base
+      
+      - REDIS_HOST=redis_cache
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=liyz12345
+      
+      - ES_HOST=elasticsearch
+      - ES_PORT=9200
+      - ES_USERNAME=
+      - ES_PASSWORD=
+      
+      - MINIO_ENDPOINT=http://minio_storage:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      
+      # 跨服务通讯（向 AI 发出信令）
+      - AI_SERVICE_HOST=http://ai-service:8001
+      - KB_INTERNAL_TOKEN=kb-dev-token-change-me-in-prod
+      
+      # JWT 认证模式（离线部署说明）
+      # JWT_DEV_MODE=true：跳过 JWT 验签，从 X-User-Id Header 信任身份。
+      #   前端未传 X-User-Id 时系统自动注入 dev-anonymous 身份，具备 _INTERNAL 文档访问权限。
+      #   适用于：内网无 SSO 网关的离线部署场景。
+      # JWT_DEV_MODE=false（生产）：必须携带合法 JWT，配合 search.trust-gateway-headers=true 使用。
+      - JWT_DEV_MODE=true
+
+    depends_on:
+      - database_pg
+      - redis_cache
+      - elasticsearch
+    restart: always
+
+  # ────────── 本地大脑推理服务 (Python FastAPI + ONNX) ──────────
+#   knowledge-base-ai:
+#     image: knowledge-base-ai:1.0.0
+#     container_name: ai-service
+#     ports:
+#       - "8001:8001"
+#     volumes:
+#       # 模型映射层，请确保存放此 docker-compose-offline.yml 时能找到 ../models 或 ./models
+#       - ./models:/app/models
+#     environment:
+#       - MODEL_BASE_PATH=/app/models/onnx_native
+#       - REDIS_HOST=redis_cache
+#       - REDIS_PORT=6379
+#       - REDIS_PASSWORD=liyz12345
+      
+#       - ES_HOST=http://elasticsearch:9200
+      
+#       - JAVA_SERVICE_HOST=http://kb-java:8080
+#       - JAVA_API_BASE=http://kb-java:8080/api/v1
+#       - KB_INTERNAL_TOKEN=kb-dev-token-change-me-in-prod
+#     depends_on:
+#       - redis_cache
+#       - elasticsearch
+#     restart: always
+
+#   # ────────── 底层基础设施部分 (如果实施现场已提供以下服务，此部分可删减) ──────────
+  
+#   database_pg:
+#     image: postgres:14-alpine
+#     container_name: database_pg
+#     environment:
+#       POSTGRES_USER: postgres
+#       POSTGRES_PASSWORD: liyz
+#       POSTGRES_DB: knowledge_base
+#     ports:
+#       - "5432:5432"
+#     volumes:
+#       - pgdata:/var/lib/postgresql/data
+#     restart: always
+
+#   redis_cache:
+#     image: redis:7.0-alpine
+#     container_name: redis_cache
+#     command: redis-server --requirepass liyz12345
+#     ports:
+#       - "6379:6379"
+#     volumes:
+#       - redisdata:/data
+#     restart: always
+
+#   elasticsearch:
+#     # 必须使用打包了 IK 插件的预编译镜像，否则遇到纯中文分词会导致 400 甚至 503 崩盘
+#     build: ./elasticsearch
+#     image: custom-elasticsearch-ik:8.6.2
+#     container_name: elasticsearch
+#     environment:
+#       - discovery.type=single-node
+#       - xpack.security.enabled=false
+#       - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+#     ports:
+#       - "9200:9200"
+#     volumes:
+#       - esdata:/usr/share/elasticsearch/data
+#     restart: always
+
+#   minio_storage:
+#     image: minio/minio:latest
+#     container_name: minio_storage
+#     environment:
+#       MINIO_ROOT_USER: minioadmin
+#       MINIO_ROOT_PASSWORD: minioadmin
+#     command: server /data --console-address ":9001"
+#     ports:
+#       - "9000:9000"
+#       - "9001:9001"
+#     volumes:
+#       - miniodata:/data
+#     restart: always
+
+# # ── 持久化数据卷声明 ──
+# volumes:
+#   pgdata:
+#     driver: local
+#   redisdata:
+#     driver: local
+#   esdata:
+#     driver: local
+#   miniodata:
+#     driver: local

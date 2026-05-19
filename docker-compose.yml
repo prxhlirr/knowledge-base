@@ -1,0 +1,102 @@
+version: '3.8'
+services:
+  elasticsearch:
+    # 启用由本地 Dockerfile 构建的整合了 IK 插件的镜像，不再使用纯净版导致 503 崩溃
+    build:
+      context: ./elasticsearch
+    image: custom-elasticsearch-ik:8.6.2
+    container_name: es86
+    environment:
+      - node.name=es01
+      - cluster.name=docker-cluster
+      - discovery.type=single-node
+      - xpack.security.enabled=false # 本地模拟，禁用安全验证以简化开发
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g" # 限制内存占用，根据本地配置调整
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    networks:
+      - elastic
+
+  # kibana:
+  #   image: docker.elastic.co/kibana/kibana:8.6.2
+  #   container_name: kibana86
+  #   ports:
+  #     - "5601:5601"
+  #   environment:
+  #     - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+  #     - I18N_LOCALE=zh-CN # 设置中文界面
+  #   depends_on:
+  #     - elasticsearch
+  #   networks:
+  #     - elastic
+
+  # redis:
+  #   image: redis:7.0-alpine
+  #   container_name: redis_cache
+  #   ports:
+  #     - "6379:6379"
+  #   networks:
+  #     - elastic
+
+  # kafka:
+  #   image: apache/kafka:latest
+  #   container_name: kafka_broker
+  #   environment:
+  #     - KAFKA_ENABLE_KRAFT=yes
+  #     - KAFKA_CFG_PROCESS_ROLES=broker,controller
+  #     - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+  #     - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+  #     - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+  #     - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
+  #     - KAFKA_CFG_BROKER_ID=1
+  #     - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@127.0.0.1:9093
+  #     - ALLOW_PLAINTEXT_LISTENER=yes
+  #   ports:
+  #     - "9092:9092"
+  #   networks:
+  #     - elastic
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio_storage
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - elastic
+
+  # postgres:
+  #   image: postgres:latest
+  #   container_name: database_pg
+  #   environment:
+  #     - POSTGRES_USER=gov_admin
+  #     - POSTGRES_PASSWORD=gov_password
+  #     - POSTGRES_DB=knowledge_base
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+  #     - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+  #   networks:
+  #     - elastic
+
+networks:
+  elastic:
+    driver: bridge
+
+volumes:
+  esdata:
+    driver: local
+  pgdata:
+    driver: local
+  miniodata:
+    driver: local

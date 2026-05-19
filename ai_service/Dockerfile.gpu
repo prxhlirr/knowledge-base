@@ -1,0 +1,146 @@
+# ── AI Service GPU 生产版 Dockerfile ─────────────────────────────────────────
+# 用途：Linux 生产服务器部署（需 NVIDIA GPU + nvidia-container-toolkit）
+# 区别于开发版 Dockerfile（python:3.10-slim）：
+#   本文件使用 NVIDIA CUDA 官方基础镜像，包含 onnxruntime-gpu 所需的全部系统库：
+#   - libcublasLt.so.12（cuBLAS）
+#   - libcudnn.so.9   （cuDNN）
+#   - libcudart.so.12 （CUDA Runtime）
+#
+# Phase 2 新增：PaddleOCR PP-Structure 扫描件版面分析
+#   whl 来源：ai-lib/paddle/ 子目录（运行 download_paddle_gpu_whl.ps1 下载）
+#   - paddlepaddle_gpu-2.6.1.post120-cp310（CUDA12.0+cuDNN8.9，~930MB）
+#   - paddleocr-2.8.1-py3-none-any.whl
+#   - paddlex-2.1.0-py3-none-any.whl
+#   - opencv_python_headless-4.13.0-cp37-abi3（~53MB）
+#   - PaddleOCR 中文模型通过 docker-compose volumes 挂载，不打入镜像
+#
+# 构建命令：build-image-gpu.bat
+# 部署命令：修改 docker-compose.yml 中 image 字段为 knowledge-base-ai:gpu
+FROM nvidia/cuda:12.4.1-cudnn9-runtime-ubuntu22.04
+
+LABEL maintainer="boyang" \
+      app="knowledge-base-ai-service-gpu" \
+      version="2.0.0"
+
+# ── 系统依赖 + Python 3.10 ────────────────────────────────────────────────────
+# libgl1 / libglib2.0-0：opencv-python-headless 运行时必须（Phase 2 新增）
+# libgomp1：onnxruntime 多线程推理必须
+# libmagic1：python-magic 文件类型检测
+# antiword：政务 .doc OLE 解析
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3-pip \
+    python3.10-dev \
+    libgomp1 \
+    libmagic1 \
+    antiword \
+    libgl1 \
+    libglib2.0-0 \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
+    && pip3 install --upgrade pip --quiet \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 创建非 root 用户 ──────────────────────────────────────────────────────────
+RUN useradd -m -u 1000 appuser
+
+WORKDIR /app
+
+# ── 复制 ai-lib（含 paddle/ 子目录，全部离线 whl）────────────────────────────
+COPY ai-lib/ /app/ai-lib/
+
+# ── [1/4] 安装通用依赖（ai-lib 根目录）────────────────────────────────────────
+# 跳过 CPU 版 onnxruntime（文件名以 onnxruntime- 开头的 whl），后续步骤安装 GPU 版
+RUN echo "[1/4] Installing base wheels from ai-lib/..." \
+    && find /app/ai-lib -maxdepth 1 -name "*.whl" \
+         ! -name "onnxruntime-*" \
+       -exec pip3 install --no-deps --no-index \
+                 --find-links=/app/ai-lib {} + \
+    && echo "[1/4] Done."
+
+# ── [2/4] 安装 source tarballs（jieba 等纯源码包）───────────────────────────
+RUN echo "[2/4] Installing source tarballs..." \
+    && find /app/ai-lib -maxdepth 1 -name "*.tar.gz" \
+       -exec pip3 install --no-deps {} + \
+    && echo "[2/4] Done."
+
+# ── [3/4] 安装 onnxruntime-gpu（GPU 版，覆盖可能存在的 CPU 版）──────────────
+RUN echo "[3/4] Installing onnxruntime-gpu..." \
+    && ORT_WHL=$(find /app/ai-lib -maxdepth 1 -name "onnxruntime_gpu*.whl" | head -1) \
+    && if [ -n "$ORT_WHL" ]; then \
+         pip3 install --no-deps "$ORT_WHL" && pip3 show onnxruntime-gpu | head -2; \
+       else \
+         echo "  [ERROR] onnxruntime_gpu whl not found in ai-lib/!" && exit 1; \
+       fi \
+    && echo "[3/4] Done."
+
+# ── [4/4] 安装 PaddleOCR Phase 2 依赖（顺序：opencv → paddle-gpu → paddleocr）
+# 设计原则：
+#   - 每个包独立 find 定位，避免一个缺失导致整个 step 失败
+#   - paddlepaddle-gpu 缺失时打印明确提示，不阻断构建（服务仍可启动，OCR 降级）
+#   - paddleocr/paddlex 安装后打印版本确认
+RUN echo "[4/4] Installing PaddleOCR Phase 2 dependencies..." \
+    \
+    && echo "  [4a] opencv-python-headless..." \
+    && CV_WHL=$(find /app/ai-lib/paddle -maxdepth 1 -name "opencv_python_headless*.whl" 2>/dev/null | head -1) \
+    && if [ -n "$CV_WHL" ]; then \
+         pip3 install --no-deps "$CV_WHL" \
+         && python3 -c "import cv2; print('      cv2 version:', cv2.__version__)"; \
+       else \
+         echo "  [WARN] opencv_python_headless whl not found - DeskewTransform may fail"; \
+       fi \
+    \
+    && echo "  [4b] paddlepaddle-gpu..." \
+    && PADDLE_WHL=$(find /app/ai-lib/paddle -maxdepth 1 -name "paddlepaddle_gpu*.whl" 2>/dev/null | head -1) \
+    && if [ -n "$PADDLE_WHL" ]; then \
+         pip3 install --no-deps "$PADDLE_WHL" \
+         && python3 -c "import paddle; print('      paddle version:', paddle.__version__)"; \
+       else \
+         echo "  [WARN] paddlepaddle_gpu whl not found in ai-lib/paddle/"; \
+         echo "         Run: download_paddle_gpu_whl.ps1 on the build machine"; \
+         echo "         Scanned PDF OCR will be UNAVAILABLE until whl is provided."; \
+       fi \
+    \
+    && echo "  [4c] paddleocr + paddlex..." \
+    && PADDLEOCR_WHL=$(find /app/ai-lib/paddle -maxdepth 1 -name "paddleocr*.whl" 2>/dev/null | head -1) \
+    && PADDLEX_WHL=$(find /app/ai-lib/paddle -maxdepth 1 -name "paddlex*.whl" 2>/dev/null | head -1) \
+    && if [ -n "$PADDLEOCR_WHL" ] && [ -n "$PADDLEX_WHL" ]; then \
+         pip3 install --no-deps "$PADDLEX_WHL" "$PADDLEOCR_WHL" \
+         && python3 -c "import paddleocr; print('      paddleocr installed OK')"; \
+       else \
+         echo "  [WARN] paddleocr or paddlex whl not found - OCR pipeline unavailable"; \
+       fi \
+    \
+    && echo "[4/4] Done."
+
+# ── 复制应用代码 ──────────────────────────────────────────────────────────────
+COPY main.py task_worker.py .env* ./
+COPY core/ ./core/
+COPY scripts/ ./scripts/
+
+# ── 创建模型挂载点 ────────────────────────────────────────────────────────────
+# /app/models/onnx_native/ ← BGE-M3 + Reranker ONNX 模型（volume 挂载）
+# /app/models/paddle_ocr/  ← PaddleOCR 中文模型（Phase 2，volume 挂载）
+RUN mkdir -p /app/models/onnx_native /app/models/paddle_ocr
+
+# ── 环境变量 ─────────────────────────────────────────────────────────────────
+ENV PYTHONPATH=/app \
+    PYTHONIOENCODING=utf-8 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    PADDLE_OCR_MODEL_DIR=/app/models/paddle_ocr \
+    FLAGS_fraction_of_gpu_memory_to_use=0.3
+
+# ── 权限 + 启动 ───────────────────────────────────────────────────────────────
+RUN chown -R appuser:appuser /app
+USER appuser
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/ai/health')" || exit 1
+
+EXPOSE 8001
+
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", \
+     "--workers", "1", "--loop", "asyncio"]

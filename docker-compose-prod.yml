@@ -1,0 +1,223 @@
+version: '3.8'
+
+# =====================================================================
+# 知识库系统 - 生产环境 Docker Compose
+# 目标服务器：Intel Xeon E5-2650 v4 x2 | 128 GB RAM | Tesla P4 8GB
+# 使用前：全局替换 <CHANGE_ME_*> 为实际密码
+# =====================================================================
+
+services:
+
+  # ────────── Elasticsearch 8.6.2 ──────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.6.2
+    container_name: es86
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      # 32 GB 堆（JVM 指针压缩上限，不得超过此值）
+      - "ES_JAVA_OPTS=-Xms32g -Xmx32g"
+      # 限制 ES 内部使用的 CPU 核数（预留核给其他服务）
+      - "processors=12"
+      - indices.memory.index_buffer_size=10%
+      - thread_pool.search.queue_size=1000
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    mem_limit: 68g        # 堆 32G + 堆外 Lucene 缓存，预留余量
+    restart: always
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # ────────── PostgreSQL 14 ──────────
+  postgres:
+    image: postgres:14-alpine
+    container_name: database_pg
+    environment:
+      POSTGRES_USER: kb_admin
+      POSTGRES_PASSWORD: <CHANGE_ME_PG_PASSWORD>     # ← 修改
+      POSTGRES_DB: knowledge_base
+    command: >
+      postgres
+      -c shared_buffers=16GB
+      -c effective_cache_size=32GB
+      -c maintenance_work_mem=2GB
+      -c work_mem=128MB
+      -c max_connections=200
+      -c max_worker_processes=12
+      -c max_parallel_workers=12
+      -c max_parallel_workers_per_gather=4
+      -c wal_buffers=64MB
+      -c checkpoint_completion_target=0.9
+      -c log_min_duration_statement=500
+    ports:
+      - "127.0.0.1:5432:5432"   # 仅本机可访问
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 20g
+    restart: always
+
+  # ────────── Redis 7.0 ──────────
+  redis:
+    image: redis:7.0-alpine
+    container_name: redis_cache
+    command: >
+      redis-server
+      --maxmemory 4gb
+      --maxmemory-policy allkeys-lru
+      --requirepass <CHANGE_ME_REDIS_PASSWORD>        # ← 修改
+      --save 900 1
+      --save 300 10
+      --appendonly no
+    ports:
+      - "127.0.0.1:6379:6379"   # 仅本机可访问
+    volumes:
+      - redisdata:/data
+    mem_limit: 5g
+    restart: always
+
+  # ────────── MinIO ──────────
+  minio:
+    image: minio/minio:latest
+    container_name: minio_storage
+    environment:
+      MINIO_ROOT_USER: <CHANGE_ME_MINIO_ACCESS_KEY>      # ← 修改（≥3字符）
+      MINIO_ROOT_PASSWORD: <CHANGE_ME_MINIO_SECRET_KEY>  # ← 修改（≥8字符）
+    ports:
+      - "9000:9000"
+      - "9001:9001"       # MinIO 控制台
+    volumes:
+      - miniodata:/data
+    command: server /data --console-address ":9001"
+    mem_limit: 2g
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ────────── Ollama（Tesla P4 GPU 加速）──────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama_llm
+    environment:
+      - OLLAMA_NUM_GPU=1           # 使用 1 块 GPU
+      - OLLAMA_NUM_PARALLEL=2      # P4 8GB VRAM，同时处理 2 路并发
+      - OLLAMA_MAX_LOADED_MODELS=1 # 只保持 1 个模型在 VRAM
+      - OLLAMA_GPU_OVERHEAD=512    # 预留 512MB VRAM 给系统
+    ports:
+      - "127.0.0.1:11434:11434"   # 仅本机可访问
+    volumes:
+      - ollamadata:/root/.ollama
+    mem_limit: 4g
+    restart: always
+    # Tesla P4 GPU 直通（需要 NVIDIA Docker Runtime）
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ────────── Java 知识库网关服务 ──────────
+  java-service:
+    image: knowledge-base-java:1.0.0
+    container_name: kb-java
+    # 配置文件挂载：直接编辑宿主机 java_service/config/application.yml，重启即生效
+    volumes:
+      - ./java_service/config:/app/config:ro   # 配置目录（只读挂载防止容器内误写）
+      - kb_uploads:/app/uploads                 # 文件上传持久化目录
+    ports:
+      - "8080:8080"
+    environment:
+      # JVM 堆配置（按服务器内存调整）
+      - JAVA_OPTS=-Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+      # 以下环境变量会覆盖 application.yml 中对应的 ${ENV_VAR:default} 占位符
+      # 密码类配置建议通过环境变量注入，而非明文写入 yml
+      - KB_INTERNAL_TOKEN=<CHANGE_ME_KB_INTERNAL_TOKEN>
+      - JWT_SECRET=<CHANGE_ME_JWT_SECRET_32CHARS>
+      - JWT_DEV_MODE=false
+    # depends_on: ES/PostgreSQL/Redis 已在离线环境独立运行，无需声明依赖
+    mem_limit: 3g
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  # ────────── 前端（Vue + Nginx）──────────
+  frontend:
+    image: knowledge-base-frontend:1.0.0
+    container_name: kb-frontend
+    # nginx.conf 挂载：直接编辑宿主机文件，执行 docker exec kb-frontend nginx -s reload 生效
+    volumes:
+      - ./frontend/config/nginx.conf:/etc/nginx/conf.d/app.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - java-service   # java-service 在本 compose 中，保留依赖
+    mem_limit: 256m
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/index.html"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ────────── AI Python 服务 ──────────
+  ai-service:
+    image: knowledge-base-ai:1.0.0
+    container_name: kb-ai
+    volumes:
+      # .env 配置挂载（可手动编辑，docker restart kb-ai 生效）
+      - ./ai_service/config:/app/config:ro
+      # BGE-M3 / Reranker ONNX 模型目录挂载（模型无需打包进镜像）
+      # 宿主机路径：./models/onnx_native（含 bge-m3/ 和 bge-reranker-v2-m3/）
+      - ./models/onnx_native:/app/models/onnx_native:ro
+    ports:
+      - "127.0.0.1:8001:8001"  # 仅本机可访问，外部通过 Java 服务代理
+    environment:
+      # MODEL_BASE_PATH 覆盖 model_manager.py 中的默认路径，指向挂载的模型目录
+      - MODEL_BASE_PATH=/app/models/onnx_native
+    # depends_on: ES/Redis 已在离线环境独立运行，无需声明依赖
+    mem_limit: 8g     # BGE-M3 fp32 约 3.5GB VRAM / RAM，预留余量
+    restart: always
+    # NVIDIA GPU 直通（需要 NVIDIA Container Toolkit）
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/ai/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s   # 模型加载需要约 60-90s
+      retries: 3
+
+volumes:
+  esdata:
+    driver: local
+  pgdata:
+    driver: local
+  redisdata:
+    driver: local
+  miniodata:
+    driver: local
+  ollamadata:
+    driver: local
+  kb_uploads:
+    driver: local
+

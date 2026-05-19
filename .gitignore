@@ -1,0 +1,128 @@
+# ─────────────────────────────────────────────────────────────
+# 知识库项目通用 .gitignore 配置
+# ─────────────────────────────────────────────────────────────
+
+# ═══ 根目录调试与临时数据文件（精准排除，避免污染）═══
+# 这些是本地开发或联调生成的 ES/数据库数据导出包与测试输入，严禁提交
+/clean.json
+/clean_dirty.json
+/clean_es.json
+/clean_org_es.json
+/clean_zd.json
+/clean_zd_es.json
+/dirty.json
+/es_result1.json
+/es_result2.json
+/es_result3.json
+/full_test_doc.json
+/full_test_doc_no_vec.json
+/full_test_doc_no_vec_utf8.json
+/indices.json
+/result.json
+/result_es.json
+/result_org_es.json
+/result_zd.json
+/result_zd_es.json
+/search_test.json
+/test_doc.json
+/test_result.json
+
+# ═══ 根目录下的个人调试/临时测试脚本 ═══
+# 避免每个人的本地临时速度测试、重排测试脚本污染主分支
+/similarity_test.py
+/test_ai_speed.py
+/test_chunking_fixes.py
+/test_java_scores.py
+/test_latency.py
+/test_model_lazy_loading.py
+/test_noise_classifier.py
+/test_regex.py
+/test_rerank.py
+/git_sim_service.txt
+/search_result_013.txt
+/test_out.txt
+/response.json
+
+# ═══ 大体积二进制工具与镜像包 ═══
+# 避免将巨大的容器导出包和独立反编译 jar 引入仓库，导致 Git 历史不可逆地急剧膨胀
+/cfr.jar
+/ai_service/ai-service.tar
+/frontend/frontend.tar
+
+# ═══ 本地上传与临时生成文件夹 ═══
+# 存放用户上传的真实文件，严禁提交以防泄露用户隐私和占用空间
+/uploads/
+# 临时生成的测试文档目录
+/test_docs/
+# 临时压缩解包产生的目录
+/temp_zip/
+/temp_test_tar/
+
+# ═══ 通用运行时与大体积文件 ═══
+*.tar
+*.tar.gz
+*.zip
+*.gz
+*.whl
+*.log
+*.log.*
+
+# ═══ 操作系统产生的不必要产物 ═══
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ═══ IDE / 编辑器开发配置 ═══
+# 排除本地 IDE 缓存，防止不同开发者配置发生合并冲突
+.vscode/
+.idea/
+*.iml
+
+# ═══ Python AI 服务 (ai_service) ═══
+# 排除虚拟环境和 Python 编译缓存，这些需要开发者本地生成
+ai_service/venv/
+ai_service/__pycache__/
+ai_service/**/__pycache__/
+ai_service/.pytest_cache/
+ai_service/**/.pytest_cache/
+# 离线部署的 AI 模型文件夹（体积巨大），必须通过外部网盘/独立渠道同步，不能托管在 Git
+models/
+ai_service/ai-lib/
+
+# ═══ Java 后端服务 (java_service) ═══
+# 排除 Maven 构建产物目录
+java_service/target/
+java_service/*.class
+java_service/java-lib/
+java_service/java-lib.zip
+# 排除本地 JVM 异常崩溃日志
+hs_err_pid*.log
+replay_pid*.log
+
+# ═══ 前端服务 (frontend) ═══
+# 排除前端依赖库和前端构建出的生产静态包，这些由 CI/CD 或本地编译生成
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/logs/
+frontend/*.log
+
+# ═══ 敏感环境变量文件 ═══
+# 环境变量包含核心账密，只提交模板（.env.example），严禁提交真实的 .env
+.env
+.env.local
+.env.production
+ai_service/.env
+ai_service/.env.docker
+frontend/.env
+frontend/.env.development
+frontend/.env.production
+
+# ═══ 允许提交的配置文件模板 ═══
+# 强制白名单，确保多人协作时有基础配置模板可供参考
+!.env.example
+!ai_service/.env.example
+
+# ═══ 离线部署相关（走独立通道发版，不进 Git）═══
+offline-pkgs/
+offline-pkgs.zip

@@ -1,0 +1,17 @@
+{
+  "mappings": {
+    "properties": {
+      "content": { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+      "vector": { "type": "dense_vector", "dims": 1024, "index": true, "similarity": "cosine" },
+      "metadata": {
+        "properties": {
+          "doc_id": { "type": "keyword" },
+          "chunk_idx": { "type": "integer" },
+          "data_source": { "type": "keyword" },
+          "source": { "type": "text" },
+          "issue_date": { "type": "keyword" }
+        }
+      }
+    }
+  }
+}

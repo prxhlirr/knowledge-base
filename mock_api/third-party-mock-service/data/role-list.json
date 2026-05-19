@@ -1,0 +1,11 @@
+{
+  "success": true, "message": "", "code": 0,
+  "result": {
+    "records": [
+      { "id": "{{randomId}}", "roleName": "模拟管理员", "roleCode": "mock_admin", "roleType": "101", "sqsc": "INF" },
+      { "id": "{{randomId}}", "roleName": "模拟普通用户", "roleCode": "mock_user", "roleType": "102", "sqsc": "INF" }
+    ],
+    "total": 2, "size": 10, "current": 1, "pages": 1
+  },
+  "timestamp": "{{timestamp}}"
+}

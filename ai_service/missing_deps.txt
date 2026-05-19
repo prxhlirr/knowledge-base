@@ -1,0 +1,8 @@
+io
+onnxruntime
+opencc
+paddle
+python-magic-bin
+random
+sentence-transformers
+torch

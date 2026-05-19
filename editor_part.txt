@@ -1,0 +1,228 @@
+    public Map<String, Object> findSimilarDocsForEditor(String appCode,
+                                                        String text,
+                                                        int topK,
+                                                        String excludeDocId,
+                                                        String excludeSource,
+                                                        JwtVerifier.UserIdentity identity) {
+        long startTime = System.currentTimeMillis();
+        Map<String, Object> result = new LinkedHashMap<>();
+        Map<String, Object> data = new LinkedHashMap<>();
+        Map<String, Object> timings = new LinkedHashMap<>();
+        String normalizedText = normalizeEditorText(text);
+        
+        // Focus on the tail 800 chars
+        String focusedQuery = extractFocusedText(normalizedText, 800);
+
+        data.put("items", Collections.emptyList());
+        data.put("total", 0);
+        data.put("queryChars", normalizedText.length());
+        data.put("cacheHit", false);
+        data.put("timings", timings);
+
+        if (focusedQuery.length() < Math.max(1, editorSimilarityMinInputChars)) {
+            data.put("skipped", true);
+            data.put("skipReason", "input_too_short");
+            data.put("costMs", System.currentTimeMillis() - startTime);
+            result.put("code", 200);
+            result.put("data", data);
+            return result;
+        }
+
+        topK = Math.max(1, Math.min(topK, 10));
+        String cacheKey = editorSimilarityCacheKey(appCode, identity, normalizedText, topK, excludeDocId, excludeSource);
+        Map<String, Object> cached = readEditorSimilarityCache(cacheKey);
+        if (cached != null) {
+            cached.put("cacheHit", true);
+            result.put("code", 200);
+            result.put("data", cached);
+            return result;
+        }
+
+        try {
+            long vectorStart = System.currentTimeMillis();
+            Map<String, Object> vectorPayload = new HashMap<>();
+            vectorPayload.put("text", focusedQuery);
+            // Switch to /query endpoint
+            String vectorUrl = aiHost.replace("localhost", "127.0.0.1") + "/api/ai/vector/query";
+            String vectorRespJson = restTemplate.postForObject(vectorUrl, vectorPayload, String.class);
+            Map<String, Object> vectorResp = objectMapper.readValue(vectorRespJson, Map.class);
+            timings.put("vector_ms", System.currentTimeMillis() - vectorStart);
+
+            if (!Integer.valueOf(200).equals(vectorResp.get("code"))) {
+                result.put("code", 500);
+                result.put("msg", "AI Service Error: " + vectorRespJson);
+                return result;
+            }
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> vectorData = (Map<String, Object>) vectorResp.get("data");
+            @SuppressWarnings("unchecked")
+            List<Double> queryVec = (List<Double>) vectorData.get("vector");
+            if (queryVec == null || queryVec.isEmpty()) {
+                result.put("code", 500);
+                result.put("msg", "AI Service did not return a valid document vector");
+                return result;
+            }
+
+            List<Map<String, Object>> candidates = new ArrayList<>();
+            List<Map<String, Object>> items = new ArrayList<>();
+            int fetchSize = Math.max(topK * 4, 20);
+
+            // Search directly in kb_document index using chunks
+            long knnStart = System.currentTimeMillis();
+            SearchResponse<Object> chunkResp = searchEditorSimilarChunks(queryVec, fetchSize);
+            timings.put("knn_ms", System.currentTimeMillis() - knnStart);
+            int candidateCount = chunkResp.hits().hits().size();
+
+            // Aggregate multiple chunk hits per document
+            long aggStart = System.currentTimeMillis();
+            int[] counters = aggregateEditorChunks(
+                    chunkResp, candidates, fetchSize, excludeDocId, excludeSource, identity);
+            timings.put("aggregation_ms", System.currentTimeMillis() - aggStart);
+            int deniedCount = counters[0];
+            int belowThresholdCount = counters[1];
+
+            long rerankStart = System.currentTimeMillis();
+            items = rerankEditorCandidates(focusedQuery, candidates, topK);
+            timings.put("rerank_ms", System.currentTimeMillis() - rerankStart);
+            
+            timings.put("candidate_count", candidateCount);
+            timings.put("accessible_candidate_count", candidates.size());
+            timings.put("denied_count", deniedCount);
+            timings.put("below_threshold_count", belowThresholdCount);
+
+            data.put("items", items);
+            data.put("total", items.size());
+            data.put("appCode", appCode == null ? "" : appCode);
+            data.put("costMs", System.currentTimeMillis() - startTime);
+            data.put("queryChars", normalizedText.length());
+            data.put("cacheHit", false);
+            writeEditorSimilarityCache(cacheKey, data);
+
+            result.put("code", 200);
+            result.put("data", data);
+        } catch (Exception e) {
+            System.err.println("[SimilarityService#findSimilarDocsForEditor] " + e.getMessage());
+            result.put("code", 500);
+            result.put("msg", "Error finding similar docs: " + e.getMessage());
+        }
+        return result;
+    }
+
+    /**
+     * 濠电偞鍨堕幐濠氭嚌閻愵剚鍙忛柣鏃傚帶缁€澶愭煟閺冨浂鍤欓柛妯绘尦閺屻劌鈽夊▎蹇撴懙闂侀€炲苯澧ǎ鍥閹?ES search闂備焦瀵х粙鎴︽偋閸℃稑鍨傞幖鎼娇娴滄粓鏌涢…鎴濃偓搴㈢瑹閳ь剟鐛?scroll闂備焦瀵х粙鎴λ囬婵勪汗闁搞儺鍓欑粈?limit 闂備礁鎼ˇ顐﹀礈濠靛鍑犻柛鎰电厛濞存牠鏌ㄥ┑鍡樺闁?content + metadata 闂佽瀛╃粙鎺椼€冮崱娑辨晩?
+     * 闂佽崵濮撮幖顐︽偪閸モ晜宕?vector 闂佽瀛╃粙鎺椼€冮崱娑辨晩鐎光偓閸曨剚娅?024 缂傚倸鍊风粈渚€鎮洪妸鈺佹辈闁绘棁娅ｇ壕濂告煕閺囩偛顣崇紒鈧崱娑欑叆婵炴垶顭堢€氫即鏌曢崶褎鍠橀柣娑卞櫍瀹曘劑顢橀悙鎼画闂佽绻愮换鎴﹀垂閸︻厾绀婂璺虹灱绾惧吋绻濇繛鎯т壕缂備浇绮鹃崺鏍ь焽韫囨稑绠婚悹鍥у级椤?
+     *
+     * @param index  ES 缂傚倷妞掔粚鍫曞垂閸︻厽顫曢柍鍝勬噹鐟欙妇鈧箍鍎辩换鎺旂矆婵夌ll 闂備礁鎼崯顐ｆ櫠鎼淬劌鏋侀柕鍫濐槹閻掔粯鎱ㄥΟ鎸庣【閻㈩垰纾槐?knowledge_base_*
+     * @param limit  闂備礁鎼悧鍐磻閹炬剚鐔嗛柤闀愮祷婢规鎲搁弶鎸庡鐎垫澘瀚～婵嬵敆閸屾稓妲ｉ梻?     * @return 闂備礁鎲￠…鍥窗鎼搭煉缍栭柟鐗堟緲濡﹢鏌涢妷锝呭Ω闁逞屽墮閸婂灝鐣峰顑╂棃宕熼埞鎯т壕闁告劦鍠楅弲顒勬倶閻愭彃鈷旀俊灞傚姂閺屸剝寰勯崱蹇撲壕闁惧浚鍋勯崜?_id, content, metadata
+     */
+    private String normalizeEditorText(String text) {
+        String normalized = text == null ? "" : text.replaceAll("\\s+", " ").trim();
+        int maxChars = Math.max(200, editorSimilarityMaxInputChars);
+        if (normalized.length() <= maxChars) {
+            return normalized;
+        }
+        return normalized.substring(normalized.length() - maxChars);
+    }
+
+    /**
+     * 提取用户输入末尾最具信息密度的文本窗口（即当前写作焦点），用于精确向量召回与规避 Rerank Token 溢出。
+     * @param text 标准化文本
+     * @param limit 字符上限（建议 800，约合 500 Token）
+     * @return 聚焦后的文本
+     */
+    private String extractFocusedText(String text, int limit) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        String trimmed = text.trim();
+        if (trimmed.length() <= limit) {
+            return trimmed;
+        }
+        return trimmed.substring(trimmed.length() - limit);
+    }
+
+    private String editorSimilarityCacheKey(String appCode,
+                                            JwtVerifier.UserIdentity identity,
+                                            String text,
+                                            int topK,
+                                            String excludeDocId,
+                                            String excludeSource) {
+        String userId = identity == null ? "anonymous" : stringValue(identity.getUserId());
+        String raw = stringValue(appCode) + "|" + userId + "|" + topK + "|"
+                + stringValue(excludeDocId) + "|" + stringValue(excludeSource) + "|" + text;
+        return "editor:similar:" + stringValue(appCode) + ":" + userId + ":" + sha256(raw);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> readEditorSimilarityCache(String key) {
+        if (redisTemplate == null || key == null || key.isEmpty() || editorSimilarityCacheTtlSeconds <= 0) {
+            return null;
+        }
+        try {
+            String json = redisTemplate.opsForValue().get(key);
+            if (json == null || json.trim().isEmpty()) {
+                return null;
+            }
+            return objectMapper.readValue(json, Map.class);
+        } catch (Exception e) {
+            System.err.println("[EditorSimilarityCache] read failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private void writeEditorSimilarityCache(String key, Map<String, Object> data) {
+        if (redisTemplate == null || key == null || key.isEmpty()
+                || data == null || editorSimilarityCacheTtlSeconds <= 0) {
+            return;
+        }
+        try {
+            redisTemplate.opsForValue().set(key, objectMapper.writeValueAsString(data),
+                    editorSimilarityCacheTtlSeconds, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            System.err.println("[EditorSimilarityCache] write failed: " + e.getMessage());
+        }
+    }
+
+    private String sha256(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = digest.digest((value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : bytes) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return String.valueOf((value == null ? "" : value).hashCode());
+        }
+    }
+
+    private boolean isSameDoc(String docId, String source, String excludeDocId, String excludeSource) {
+        return (!stringValue(excludeDocId).isEmpty() && stringValue(excludeDocId).equals(docId))
+                || (!stringValue(excludeSource).isEmpty() && stringValue(excludeSource).equals(source));
+    }
+
+    private String similarityLabel(double score) {
+        if (score >= 0.85) {
+            return "high";
+        }
+        if (score >= 0.70) {
+            return "near";
+        }
+        if (score >= 0.55) {
+            return "related";
+        }
+        return "weak";
+    }
+
+    private String buildDocMetaSnippet(Map<String, Object> src) {
+        String text = firstNonBlank(src.get("summary"), src.get("abstract"), src.get("content"), src.get("description"));
+        if (text.isEmpty()) {
+            return "";
+        }
+        text = text.replaceAll("\\s+", " ").trim();
+        int maxLen = 160;
+        return text.length() <= maxLen ? text : text.substring(0, maxLen) + "...";
+    }
+

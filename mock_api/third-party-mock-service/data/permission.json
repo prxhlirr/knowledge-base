@@ -1,0 +1,46 @@
+﻿{
+  "success": true,
+  "message": "",
+  "code": 0,
+  "result": {
+    "allAuth": [
+      {
+        "action": "dashboard:view",
+        "describe": "Dashboard access",
+        "type": "1",
+        "status": "1"
+      },
+      {
+        "action": "third-party:access",
+        "describe": "Third party integration access",
+        "type": "1",
+        "status": "1"
+      }
+    ],
+    "auth": [
+      {
+        "action": "user:view",
+        "describe": "View user info",
+        "type": "1"
+      },
+      {
+        "action": "user:edit",
+        "describe": "Edit user info",
+        "type": "1"
+      }
+    ],
+    "menu": [
+      {
+        "path": "/workbench",
+        "component": "workbench/index",
+        "name": "workbench",
+        "id": "{{randomId}}",
+        "meta": {
+          "title": "Workbench",
+          "keepAlive": false
+        }
+      }
+    ]
+  },
+  "timestamp": "{{timestamp}}"
+}

@@ -1,0 +1,11 @@
+﻿{
+  "name": "third-party-mock-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zero dependency mock API server for third-party integration tests",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:3000": "node server.js 3000"
+  }
+}

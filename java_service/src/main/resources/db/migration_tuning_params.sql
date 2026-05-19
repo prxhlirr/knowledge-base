@@ -1,0 +1,20 @@
+-- 增加防御防阻断相关的 9 个核心调优字段
+ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS es_query_timeout INT DEFAULT 1500;
+ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS embedding_timeout INT DEFAULT 1500;
+ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS rerank_timeout INT DEFAULT 1500;
+ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS lexical_fast_path_max_length INT DEFAULT 4;
+ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS adaptive_breaker_max_length INT DEFAULT 4;
+ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS breaker_rrf_threshold NUMERIC(10,4) DEFAULT 0.0200;
+ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS breaker_raw_score_threshold NUMERIC(10,4) DEFAULT 1.0000;
+ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS truthful_ui_max_score_limit NUMERIC(10,4) DEFAULT 0.1500;
+ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS truthful_ui_ceiling NUMERIC(10,4) DEFAULT 0.7500;
+
+COMMENT ON COLUMN sys_ai_tuning_config.es_query_timeout IS 'ES 检索时 Text 底座容忍的超时间隔(ms)';
+COMMENT ON COLUMN sys_ai_tuning_config.embedding_timeout IS '向量模型生成 Embedding 的接口硬超时(ms)';
+COMMENT ON COLUMN sys_ai_tuning_config.rerank_timeout IS '深度重排 Cross-Encoder 接口硬超时(ms)';
+COMMENT ON COLUMN sys_ai_tuning_config.lexical_fast_path_max_length IS '触发“纯词汇抢跑”免大模型运算的极限长度';
+COMMENT ON COLUMN sys_ai_tuning_config.adaptive_breaker_max_length IS '触发“短词免重排”熔断的极限长度';
+COMMENT ON COLUMN sys_ai_tuning_config.breaker_rrf_threshold IS '触发重排熔断的 RRF 融合分数下限警戒线';
+COMMENT ON COLUMN sys_ai_tuning_config.breaker_raw_score_threshold IS '触发重排熔断的 ES 原始召回分数警戒线';
+COMMENT ON COLUMN sys_ai_tuning_config.truthful_ui_max_score_limit IS '触发界面惩罚降维的底层最高分低门槛判定';
+COMMENT ON COLUMN sys_ai_tuning_config.truthful_ui_ceiling IS '触发界面惩罚后，UI 面板映射的最高分天花板';

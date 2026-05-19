@@ -1,0 +1,18 @@
+{
+  "success": true,
+  "message": "",
+  "code": 200,
+  "result": [
+    {
+      "key": "698107103444729856", "value": "698107103444729856", "title": "模拟单位1", "isLeaf": false,
+      "id": "698107103444729856", "parentId": null, "departName": "模拟单位1", "departNameAbbr": "单位1",
+      "orgCategory": "1", "orgType": "10", "orgCode": "620000040000", "status": "1", "delFlag": 0,
+      "signCode": "620000040000",
+      "children": [
+        { "key": "698107423277187072", "value": "698107423277187072", "title": "模拟单位1-1", "isLeaf": true, "id": "698107423277187072", "parentId": "698107103444729856", "departName": "模拟单位1-1", "orgCode": "620000040001", "children": [], "leaf": true }
+      ],
+      "leaf": false
+    }
+  ],
+  "timestamp": "{{timestamp}}"
+}

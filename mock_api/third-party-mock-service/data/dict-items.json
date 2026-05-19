@@ -1,0 +1,9 @@
+{
+  "success": true, "message": "", "code": 0,
+  "result": [
+    { "value": "demo_value", "text": "示例名称", "title": "示例名称" },
+    { "value": "option_1", "text": "选项一", "title": "选项一" },
+    { "value": "option_2", "text": "选项二", "title": "选项二" }
+  ],
+  "timestamp": "{{timestamp}}"
+}

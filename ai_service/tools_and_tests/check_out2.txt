@@ -1,0 +1,10 @@
+﻿Base model path: e:\project\AI\knowledge-base\models\onnx_native
+Loading e:\project\AI\knowledge-base\models\onnx_native\bge-m3\model.onnx...
+
+=== Inputs ===
+ - Name: input_ids, Shape: ['batch_size', 'sequence_length'], Type: tensor(int64)
+ - Name: attention_mask, Shape: ['batch_size', 'sequence_length'], Type: tensor(int64)
+
+=== Outputs ===
+ - Name: last_hidden_state, Shape: ['batch_size', 'sequence_length', 1024], Type: tensor(float)
+ - Name: tanh, Shape: ['batch_size', 1024], Type: tensor(float)

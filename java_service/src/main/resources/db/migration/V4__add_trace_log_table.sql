@@ -1,0 +1,42 @@
+-- -- ============================================================
+-- -- 全链路日志表 sys_app_trace_log
+-- -- 设计原则：
+-- --   1. 固定维度（trace_id/service/level/user_id/org_code）建列 → 支持等值过滤与索引
+-- --   2. 可变上下文（耗时/堆栈/请求入参）存 JSONB → 免改表扩展
+-- --   3. 两端（Java/Python）各自直连 PG 写入，不依赖 HTTP 中转
+-- -- ============================================================
+
+-- CREATE TABLE IF NOT EXISTS public.sys_app_trace_log (
+--     id            BIGSERIAL     PRIMARY KEY,
+--     trace_id      VARCHAR(64)   NOT NULL,          -- 跨服务链路唯一标识（UUID短形）
+--     service_name  VARCHAR(32)   NOT NULL,          -- 来源服务: java_service / ai_service
+--     level         VARCHAR(10)   NOT NULL DEFAULT 'INFO',  -- INFO / WARN / ERROR
+--     module        VARCHAR(64),                     -- 业务模块: DocIngest / RAGPipeline / OutboxPoller / Search
+--     content       TEXT          NOT NULL,          -- 核心日志消息
+--     extra_context JSONB,                           -- 可变扩展: 耗时/堆栈/入参等
+--     -- 操作人上下文（来自 JWT/MDC，Audit 用途）
+--     user_id       VARCHAR(64),                     -- 当前操作用户ID（对应 JWT claim: userId）
+--     org_code      VARCHAR(32),                     -- 操作用户机构代码（对应 JWT claim: deptCode）
+--     created_by    VARCHAR(128),                    -- 用户名/显示名（冗余存储，避免关联查询）
+--     created_at    TIMESTAMP   NOT NULL DEFAULT NOW()
+-- );
+
+-- COMMENT ON TABLE  public.sys_app_trace_log                    IS '全链路业务日志表（Java+Python 双端写入）';
+-- COMMENT ON COLUMN public.sys_app_trace_log.trace_id          IS '跨服务请求链路ID，用于关联 Java 与 Python 端日志';
+-- COMMENT ON COLUMN public.sys_app_trace_log.extra_context     IS 'JSONB 扩展字段，存储耗时/异常堆栈/请求入参等可变上下文，GIN索引支持jsonb查询';
+-- COMMENT ON COLUMN public.sys_app_trace_log.user_id           IS '当前操作用户ID，从 JWT claim 中提取，写入 MDC 随日志传递';
+-- COMMENT ON COLUMN public.sys_app_trace_log.org_code          IS '操作用户所属机构代码，从 JWT claim 中提取';
+-- COMMENT ON COLUMN public.sys_app_trace_log.created_by        IS '操作人显示名（冗余存储，避免 JOIN 用户表）';
+
+-- -- 按 trace_id 查全链路（最核心查询场景）
+-- CREATE INDEX IF NOT EXISTS idx_atl_trace   ON public.sys_app_trace_log (trace_id);
+-- -- 按时间范围查（运维监控场景）
+-- CREATE INDEX IF NOT EXISTS idx_atl_time    ON public.sys_app_trace_log (created_at DESC);
+-- -- JSONB GIN 索引（按 extra_context 任意字段过滤）
+-- CREATE INDEX IF NOT EXISTS idx_atl_extra   ON public.sys_app_trace_log USING GIN (extra_context);
+-- -- 按级别快速检索（ERROR 定位场景）
+-- CREATE INDEX IF NOT EXISTS idx_atl_level   ON public.sys_app_trace_log (level, created_at DESC);
+-- -- 按用户查询操作记录（审计场景）
+-- CREATE INDEX IF NOT EXISTS idx_atl_user    ON public.sys_app_trace_log (user_id, created_at DESC);
+-- -- 按机构过滤（机构维度审计）
+-- CREATE INDEX IF NOT EXISTS idx_atl_org     ON public.sys_app_trace_log (org_code, created_at DESC);

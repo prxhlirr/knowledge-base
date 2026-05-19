@@ -1,0 +1,273 @@
+# 知识库文档入库改造 — 完整设计文档
+
+> v3.0 | 2026-03-20
+
+---
+
+## 一、需求清单
+
+### A 向量化质量
+
+| 编号 | 需求 | 优先级 |
+|---|---|---|
+| A1 | BGE-M3 Sparse 向量入库，与 Dense+BM25 形成三路 RRF | P0 |
+| A2 | `quality_score < 0.30` 的 chunk 入库前过滤 | P0 |
+| A3 | coarse chunk 补充 `colloquial_vector` | P1 |
+| A4 | 内容哈希去重，同内容不同名文件不重复索引 | P1 |
+| A5 | 写入 `parent_chunk_id` 建立 coarse↔fine 父子关联 | P2 |
+
+### B 文档版本管理
+
+| 编号 | 需求 | 优先级 |
+|---|---|---|
+| B1 | 每次文档更新时自动递增 `doc_version`，老 chunk 标记 `is_latest=false` | P0 |
+| B2 | 新增 `version_at`/`updated_by` 记录变更时间和操作人 | P0 |
+| B3 | 支持按版本号查询历史内容（管理端回溯）| P1 |
+
+### C 权限与标签
+
+| 编号 | 需求 | 优先级 |
+|---|---|---|
+| C1 | 12位行政区划编码分 l2/l4/l6/l9/full 五级字段存入 ES | P0 |
+| C2 | 可见度分级：PUBLIC / INTERNAL / DEPT / PRIVATE / GRANT | P0 |
+| C3 | 支持业务群组 RBAC（access_groups），替代大白名单 | P1 |
+| C4 | 经手人字段（handler_user_ids / handler_dept_l6）| P1 |
+| C5 | MySQL 权限事件溯源 + Redis 有效权限快照 | P2 |
+| C6 | 内容标签（tags 多值字段，前端筛选）| P0 |
+
+### D ES 索引管理
+
+| 编号 | 需求 | 优先级 |
+|---|---|---|
+| D1 | 采用 Index Template + Alias 机制，支持热升级 mapping | P1 |
+
+---
+
+## 二、数据流向图
+
+### 2.1 文档入库流程
+
+```mermaid
+flowchart TD
+    A[用户上传文档\n携带权限/标签元数据] --> B[DocumentIngestionService\nJava]
+    B --> C[MinIO 存储原始文件]
+    B --> D[Redis 任务队列 DOC_TASK_QUEUE]
+    D --> E[task_worker.py\nRAGPipeline]
+
+    E --> F[文档解析 MarkItDown]
+    F --> G{质量评估\nquality_score}
+    G -- < 0.30 跳过 --> H[丢弃低质量 chunk]
+    G -- >= 0.30 --> I[双粒度切片\ncoarse + fine]
+
+    I --> J[BGE-M3 双路编码\ndense_vector + sparse_vector]
+    J --> K[LLM 离线生成\ncolloquial_vector + Q&A 向量]
+    K --> L[版本号自增\n老版本 is_latest=false]
+    L --> M[写入 ES kb_document_v1]
+    L --> N[写入 ES kb_qa_pairs]
+    L --> O[更新 kb_doc_meta\n文档级 doc_vector]
+
+    B --> P[MySQL 权限事件\ndoc_permission_events]
+    P --> Q[后台 Job\n物化 Redis 权限快照]
+```
+
+### 2.2 搜索权限过滤流程
+
+```mermaid
+flowchart LR
+    A[用户发起搜索\nJWT 含 dept_code] --> B[SearchService]
+    B --> C[从 JWT 解析用户祖先路径\nl2/l4/l6/l9/full]
+    B --> D[从 Redis 取用户群组\naccess_groups]
+    C & D --> E[构造 ES bool filter\n权限 + is_latest=true]
+    E --> F[ES 三路召回\nBM25 + Dense KNN + Sparse KNN]
+    F --> G[RRF 融合]
+    G --> H[ColBERT 精排]
+    H --> I[返回结果]
+```
+
+---
+
+## 三、ES Mapping 设计
+
+**索引名**：`kb_document_v1`（通过别名 `kb_document` 操作）
+
+```json
+{
+  "mappings": {
+    "properties": {
+      "content": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart"
+      },
+      "vector": {
+        "type": "dense_vector", "dims": 1024,
+        "index": true, "similarity": "cosine"
+      },
+      "sparse_vector": { "type": "rank_features" },
+      "colloquial_vector": {
+        "type": "dense_vector", "dims": 1024,
+        "index": true, "similarity": "cosine"
+      },
+      "chunk_granularity": { "type": "keyword" },
+      "keywords":          { "type": "keyword" },
+      "parent_chunk_id":   { "type": "keyword" },
+
+      "metadata": {
+        "properties": {
+          "source":          { "type": "keyword" },
+          "chunk_id":        { "type": "integer" },
+          "chunk_type":      { "type": "keyword" },
+          "section_path":    { "type": "keyword" },
+          "quality_score":   { "type": "float"   },
+
+          "doc_version":     { "type": "integer" },
+          "is_latest":       { "type": "boolean" },
+          "version_at":      { "type": "date", "format": "epoch_millis" },
+          "updated_by":      { "type": "keyword" },
+
+          "dept_l2":         { "type": "keyword" },
+          "dept_l4":         { "type": "keyword" },
+          "dept_l6":         { "type": "keyword" },
+          "dept_l9":         { "type": "keyword" },
+          "dept_code_full":  { "type": "keyword" },
+
+          "visibility":      { "type": "keyword" },
+          "access_groups":   { "type": "keyword" },
+          "uploader_id":     { "type": "keyword" },
+          "handler_user_ids":{ "type": "keyword" },
+          "handler_dept_l6": { "type": "keyword" },
+
+          "tags":            { "type": "keyword" },
+          "publish_time":    { "type": "date", "format": "yyyy-MM-dd||epoch_millis" },
+          "document_number": { "type": "keyword" },
+          "dynamic_meta":    { "type": "object", "dynamic": true }
+        }
+      }
+    }
+  }
+}
+```
+
+**辅助索引 `kb_qa_pairs`**（Q&A 预置，无变化）
+
+**辅助索引 `kb_doc_meta`** 新增版本字段：
+
+```json
+{ "doc_version": { "type": "integer" }, "updated_by": { "type": "keyword" } }
+```
+
+---
+
+## 四、MySQL 数据库设计
+
+### 4.1 权限事件表（事件溯源）
+
+```sql
+CREATE TABLE doc_permission_events (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    doc_id       VARCHAR(256) NOT NULL COMMENT '文档 ES _id 或 source_name',
+    action       ENUM('GRANT','REVOKE','HANDLER','VISIBILITY_CHANGE') NOT NULL,
+    target_type  ENUM('USER','DEPT','GROUP') NOT NULL,
+    target_value VARCHAR(128) NOT NULL COMMENT '用户ID / 部门编码 / 群组名',
+    operator_id  VARCHAR(64)  NOT NULL,
+    created_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    INDEX idx_doc (doc_id),
+    INDEX idx_time (created_at)
+) COMMENT='文档权限变更事件溯源';
+```
+
+### 4.2 权限群组表（RBAC）
+
+```sql
+CREATE TABLE permission_groups (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    group_code  VARCHAR(64)  UNIQUE NOT NULL COMMENT '群组唯一标识',
+    group_name  VARCHAR(128) NOT NULL,
+    created_by  VARCHAR(64),
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+) COMMENT='权限群组定义';
+
+CREATE TABLE permission_group_members (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    group_code  VARCHAR(64)  NOT NULL,
+    dept_code   VARCHAR(32)  COMMENT '部门编码（12位）',
+    user_id     VARCHAR(64)  COMMENT '用户ID（可选）',
+    INDEX idx_group (group_code),
+    INDEX idx_dept (dept_code)
+) COMMENT='群组成员（部门或用户）';
+```
+
+### 4.3 文档版本记录表（历史追踪）
+
+```sql
+CREATE TABLE doc_version_history (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    source_name  VARCHAR(256) NOT NULL COMMENT '文档名称',
+    doc_version  INT          NOT NULL,
+    content_hash VARCHAR(64)  COMMENT '正文前2000字MD5，用于去重',
+    operator_id  VARCHAR(64),
+    chunk_count  INT          COMMENT '该版本切片数',
+    created_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uk_source_ver (source_name, doc_version),
+    INDEX idx_source (source_name)
+) COMMENT='文档版本历史记录';
+```
+
+### 4.4 部门组织树表
+
+```sql
+CREATE TABLE dept_tree (
+    dept_code    VARCHAR(32)  PRIMARY KEY COMMENT '12位行政区划编码',
+    dept_name    VARCHAR(128) NOT NULL,
+    dept_l2      VARCHAR(4)   COMMENT '省级前缀',
+    dept_l4      VARCHAR(8)   COMMENT '市级前缀',
+    dept_l6      VARCHAR(12)  COMMENT '区县级前缀',
+    dept_l9      VARCHAR(18)  COMMENT '乡镇级前缀',
+    dept_level   TINYINT      COMMENT '1省 2市 3区 4乡 5机构',
+    parent_code  VARCHAR(32),
+    is_active    TINYINT(1) DEFAULT 1,
+    INDEX idx_l2 (dept_l2),
+    INDEX idx_l6 (dept_l6)
+) COMMENT='行政区划组织树';
+```
+
+---
+
+## 五、Redis 缓存设计
+
+| Key 格式 | 类型 | 内容 | TTL |
+|---|---|---|---|
+| `perm:{doc_id}:depts` | Set | 有权访问该文档的部门 l6 集合 | 5min |
+| `perm:{doc_id}:users` | Set | 有权访问该文档的用户 ID 集合 | 5min |
+| `user:{uid}:groups` | Set | 用户所属群组 code 集合 | 10min |
+| `dept:{code}:ancestors` | List | 该部门所有祖先路径（l2/l4/l6/l9/full）| 30min |
+| `doc:{source}:version` | String | 当前最大版本号 | 无（写时更新）|
+
+---
+
+## 六、实施路径
+
+```
+Phase 1（本周 · 低风险）
+  ✦ A2  quality_score < 0.30 过滤（5行）
+  ✦ B1/B2 doc_version 自增 + version_at + updated_by（10行）
+  ✦ C1  dept_lX 分级字段写入 ES（替换硬编码 dept_global）
+  ✦ C2/C6 visibility + tags 字段写入
+  ✦ SearchService 权限 filter（is_latest=true + dept_lX terms）
+
+Phase 2（下周 · 中等）
+  ✦ A1  BGE-M3 Sparse 向量 + 三路 RRF
+  ✦ A4  内容哈希去重（doc_version_history 表）
+  ✦ C3  access_groups 群组写入 + 搜索侧 terms 过滤
+  ✦ D1  ES Index Template + Alias
+
+Phase 3（后续 · 较高）
+  ✦ C4/C5 经手人字段 + MySQL 事件溯源 + Redis 权限快照
+  ✦ A3  coarse chunk colloquial_vector 补全
+  ✦ A5  parent_chunk_id 父子关联
+  ✦ B3  管理端历史版本查询 UI
+  ✦ 前端上传表单权限/标签选择
+```
+
+> [!IMPORTANT]
+> Phase 1 上线时需在 SearchService 中对 `visibility`/`dept_lX` 字段**缺失的存量文档**做默认放行处理（`must_not: exists on visibility` → treat as INTERNAL），避免存量数据因新 filter 而全部返回空。

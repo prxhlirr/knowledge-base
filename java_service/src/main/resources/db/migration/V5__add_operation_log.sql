@@ -1,0 +1,54 @@
+-- -- ============================================================
+-- -- 操作日志表 sys_operation_log
+-- -- 设计原则：
+-- --   1. Java 服务与 AI 服务双端共写，通过 service_name 字段区分来源
+-- --   2. trace_id 贯穿全链路（Java 在 MDC 生成，HTTP 调用 AI 时透传 X-Trace-Id Header）
+-- --   3. 用户身份字段冗余存储（userId/deptCode/deptName 来自 JWT，避免关联查询）
+-- --   4. 请求/响应体做长度截断，避免大字段撑爆表空间
+-- -- ============================================================
+
+-- CREATE TABLE IF NOT EXISTS public.sys_operation_log (
+--     id              BIGSERIAL       PRIMARY KEY,
+--     trace_id        VARCHAR(64)     NOT NULL,               -- 跨服务链路 ID（MDC 生成，Java→AI HTTP 透传）
+--     service_name    VARCHAR(32)     NOT NULL DEFAULT 'java_service', -- 来源服务：java_service / ai_service
+--     module          VARCHAR(64),                            -- 操作模块（如"文档管理"/"搜索"/"向量推理"）
+--     operation       VARCHAR(128),                           -- 操作名称（如"混合检索"/"删除文档"/"BGE重排"）
+--     method          VARCHAR(10),                            -- HTTP 方法（GET/POST/DELETE/PUT）
+--     request_uri     VARCHAR(512),                           -- 请求路径（含路径参数）
+--     request_params  TEXT,                                   -- 请求入参 JSON 快照（截断至配置字节数）
+--     response_data   TEXT,                                   -- 响应体 JSON 快照（截断至配置字节数）
+--     status_code     INTEGER,                                -- HTTP 状态码
+--     success         BOOLEAN         NOT NULL DEFAULT TRUE,  -- 是否成功（无异常且非 5xx）
+--     error_msg       TEXT,                                   -- 异常信息（success=false 时填充）
+--     cost_ms         INTEGER,                                -- 接口耗时（毫秒）
+--     user_id         VARCHAR(64),                            -- 操作人 ID（来自 JWT claim：userId）
+--     user_name       VARCHAR(128),                           -- 操作人姓名（JWT claim 冗余，避免关联查询）
+--     dept_code       VARCHAR(32),                            -- 操作单位代码（JWT claim：deptCode）
+--     dept_name       VARCHAR(128),                           -- 操作单位名称（JWT claim：deptName，已确认 JWT 含此字段）
+--     client_ip       VARCHAR(64),                            -- 客户端 IP（X-Forwarded-For 优先，无则取 RemoteAddr）
+--     created_at      TIMESTAMP       NOT NULL DEFAULT NOW()  -- 记录时间（DB 默认写入，不依赖应用时钟）
+-- );
+
+-- COMMENT ON TABLE  public.sys_operation_log                   IS '业务操作日志表（Java+AI 双服务写入，trace_id 跨端关联）';
+-- COMMENT ON COLUMN public.sys_operation_log.trace_id          IS '跨服务请求链路 ID，Java 端由 JwtAuthInterceptor 写入 MDC，通过 X-Trace-Id Header 传播至 AI 服务';
+-- COMMENT ON COLUMN public.sys_operation_log.service_name      IS '日志来源服务：java_service=Java 主服务，ai_service=Python AI 推理服务';
+-- COMMENT ON COLUMN public.sys_operation_log.module            IS '业务模块，Java 端由 @OperationLog(module) 注解声明，AI 端由路由前缀自动推断';
+-- COMMENT ON COLUMN public.sys_operation_log.operation         IS '具体操作名称，如"混合检索"、"删除文档"、"BGE向量化"';
+-- COMMENT ON COLUMN public.sys_operation_log.request_params    IS '请求入参 JSON 快照，超出配置长度时截断并追加[truncated]标记';
+-- COMMENT ON COLUMN public.sys_operation_log.response_data     IS '响应体 JSON 快照，超出配置长度时截断并追加[truncated]标记';
+-- COMMENT ON COLUMN public.sys_operation_log.user_id           IS '操作人用户 ID，从 JWT claim 提取；AI 服务内部调用时固定为 system';
+-- COMMENT ON COLUMN public.sys_operation_log.dept_name         IS '操作单位中文名称，从 JWT claim deptName 冗余存储';
+-- COMMENT ON COLUMN public.sys_operation_log.client_ip         IS '客户端真实 IP，优先取 X-Forwarded-For（nginx 反向代理场景），兜底取 HttpServletRequest.getRemoteAddr()';
+
+-- -- 按操作人+时间查历史（最高频查询：管理员查"某用户的操作记录"）
+-- CREATE INDEX IF NOT EXISTS idx_ol_user_time    ON public.sys_operation_log (user_id,      created_at DESC);
+-- -- 按模块+时间过滤（管理界面按功能模块分类查看）
+-- CREATE INDEX IF NOT EXISTS idx_ol_module_time  ON public.sys_operation_log (module,       created_at DESC);
+-- -- 按 trace_id 关联全链路（排障场景：一条 trace 串联 Java + AI 两端日志）
+-- CREATE INDEX IF NOT EXISTS idx_ol_trace        ON public.sys_operation_log (trace_id);
+-- -- 按机构+时间审计（合规场景：查某机构所有操作）
+-- CREATE INDEX IF NOT EXISTS idx_ol_dept         ON public.sys_operation_log (dept_code,    created_at DESC);
+-- -- 按服务来源分析（运维场景：分别分析 Java 侧和 AI 侧的日志）
+-- CREATE INDEX IF NOT EXISTS idx_ol_service      ON public.sys_operation_log (service_name, created_at DESC);
+-- -- 全局时间倒序分页（默认视图：所有日志按时间倒序翻页）
+-- CREATE INDEX IF NOT EXISTS idx_ol_created      ON public.sys_operation_log (created_at DESC);

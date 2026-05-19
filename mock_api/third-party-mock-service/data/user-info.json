@@ -1,0 +1,46 @@
+﻿{
+  "success": true,
+  "message": "",
+  "code": 200,
+  "result": {
+    "userInfo": {
+      "id": "{{userId}}",
+      "username": "{{username}}",
+      "realname": "{{realname}}",
+      "avatar": "",
+      "birthday": null,
+      "sex": 1,
+      "email": "mock.user@example.com",
+      "phone": "{{phone}}",
+      "orgCode": "{{orgCode}}",
+      "orgCodeTxt": "{{orgName}}",
+      "status": 1,
+      "workNo": "{{workNo}}",
+      "telephone": "0931-8888888",
+      "identity": "1",
+      "title": "Mock Police Officer",
+      "homePath": "/workbench/pcs",
+      "roleList": [
+        {
+          "id": "{{randomId}}",
+          "roleName": "{{roleName}}",
+          "roleCode": "{{roleCode}}",
+          "roleType": "1"
+        }
+      ],
+      "departList": [
+        {
+          "id": "698107423277187072",
+          "parentId": "698107103444729856",
+          "departName": "{{orgName}}",
+          "departNameAbbr": "Mock Dept",
+          "orgCategory": "2",
+          "orgType": "11",
+          "orgCode": "{{orgCode}}",
+          "status": "1"
+        }
+      ]
+    }
+  },
+  "timestamp": "{{timestamp}}"
+}

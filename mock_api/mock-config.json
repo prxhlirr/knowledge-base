@@ -1,0 +1,416 @@
+{
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/sys/login",
+      "description": "用户登录",
+      "generateToken": true,
+      "response": "$ref:user-login.json"
+    },
+    {
+      "method": "POST",
+      "path": "/sys/logout",
+      "description": "用户登出",
+      "response": {
+        "success": true,
+        "message": "退出登录成功！",
+        "code": 200,
+        "result": null,
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sys/selectDepart",
+      "description": "切换登录单位",
+      "requireAuth": true,
+      "generateToken": true,
+      "response": "$ref:user-login.json"
+    },
+    {
+      "method": "PUT",
+      "path": "/sys/selectDepart",
+      "description": "切换登录单位",
+      "requireAuth": true,
+      "generateToken": true,
+      "response": "$ref:user-login.json"
+    },
+    {
+      "method": "GET",
+      "path": "/sys/user/getUserInfo",
+      "description": "获取用户信息",
+      "requireAuth": true,
+      "response": "$ref:user-info.json"
+    },
+    {
+      "method": "GET",
+      "path": "/sys/user/queryListByParam",
+      "description": "按单位查询用户列表",
+      "response": "$ref:user-list.json"
+    },
+    {
+      "method": "GET",
+      "path": "/sys/user/queryListByRole",
+      "description": "按角色查询用户列表",
+      "response": "$ref:user-list.json"
+    },
+    {
+      "method": "GET",
+      "path": "/sys/user/queryListByXnCode",
+      "description": "按虚拟单位查询用户列表",
+      "response": "$ref:user-list.json"
+    },
+    {
+      "method": "GET",
+      "path": "/basic/peopleInfo/queryList",
+      "description": "按身份查询人员列表",
+      "response": "$ref:people-info.json"
+    },
+    {
+      "method": "GET",
+      "path": "/basic/peopleInfo/dqdlRyxx",
+      "description": "按身份证获取人员信息",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": {
+          "records": "$ref:people-info.json",
+          "total": 1,
+          "size": 10,
+          "current": 1,
+          "pages": 1
+        },
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/sys/user/depTree",
+      "description": "本级单位树",
+      "response": "$ref:depart-tree.json"
+    },
+    {
+      "method": "GET",
+      "path": "/sys/sysDepart/queryDepartTreeSync",
+      "description": "异步查询下级单位树",
+      "response": "$ref:depart-list.json"
+    },
+    {
+      "method": "GET",
+      "path": "/sys/sysDepart/getDepartName",
+      "description": "获取单位信息",
+      "response": "$ref:depart-info.json"
+    },
+    {
+      "method": "GET",
+      "path": "/sys/sysDepart/queryDepartListV2",
+      "description": "按代码和类型查询单位",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": [
+          {
+            "id": "{{randomId}}",
+            "departName": "模拟单位",
+            "departNameAbbr": "模拟",
+            "orgCategory": "1",
+            "orgType": "99",
+            "orgCode": "620000040000",
+            "status": "1"
+          }
+        ],
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/basic/sysDepart/getDepartChildByDepartId",
+      "description": "按id查下级单位",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": [
+          {
+            "departNameAbbr": "模拟",
+            "orgCategory": "1",
+            "orgCode": "620000040000",
+            "id": "{{randomId}}",
+            "departName": "模拟子单位",
+            "status": "1"
+          }
+        ],
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/sys/sysDepart/searchBy",
+      "description": "关键字搜索单位",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 0,
+        "result": [
+          {
+            "key": "{{randomId}}",
+            "title": "模拟单位",
+            "isLeaf": true,
+            "id": "{{randomId}}",
+            "departName": "模拟单位",
+            "orgCode": "620000040000",
+            "leaf": true
+          }
+        ],
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/sys/role/list",
+      "description": "获取角色列表",
+      "response": "$ref:role-list.json"
+    },
+    {
+      "method": "GET",
+      "path": "/sys/permission/getUserPermissionByToken",
+      "description": "获取权限信息",
+      "requireAuth": true,
+      "response": "$ref:permission.json"
+    },
+    {
+      "method": "GET",
+      "path": "/sys/permission/getPermCode",
+      "description": "获取权限Code",
+      "requireAuth": true,
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 0,
+        "result": [
+          "user:js",
+          "user:edit",
+          "user:view",
+          "component:newsqjwd",
+          "component:dashboard"
+        ],
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/sys/dict/getDictItems/:code",
+      "description": "按code获取字典",
+      "response": "$ref:dict-items.json"
+    },
+    {
+      "method": "GET",
+      "path": "/sys/dict/queryDictItemsByCode",
+      "description": "按code获取字典详情",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": [
+          {
+            "id": "{{randomId}}",
+            "dictId": "{{randomId}}",
+            "dictCode": "mock_dict",
+            "itemText": "示例项",
+            "itemValue": "demo",
+            "sortOrder": 1,
+            "status": 1
+          }
+        ],
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/sys/dict/queryAllDictItems",
+      "description": "获取全部字典",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": {
+          "sex": [
+            {
+              "value": "1",
+              "text": "男",
+              "title": "男"
+            },
+            {
+              "value": "2",
+              "text": "女",
+              "title": "女"
+            }
+          ],
+          "depart_category": [
+            {
+              "value": "1",
+              "text": "单位",
+              "title": "单位"
+            },
+            {
+              "value": "2",
+              "text": "部门",
+              "title": "部门"
+            }
+          ]
+        },
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/sys/category/getCategoryByType",
+      "description": "级联字典查询",
+      "response": "$ref:category.json"
+    },
+    {
+      "method": "POST",
+      "path": "/act/process/extActProcess/startProcess",
+      "description": "提交审批",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": "{{randomId}}",
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/act/process/extActProcess/getProcessDetail",
+      "description": "获取审批详情",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": {
+          "processInstanceId": "{{randomId}}",
+          "status": "running",
+          "startUser": "张三",
+          "startTime": "{{datetime}}"
+        },
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/gaw/user/getUserInfo",
+      "description": "统一用户信息",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": {
+          "code": "123456",
+          "sfzh": "620102199509275310",
+          "name": "张三",
+          "departCode": "620000040000",
+          "departName": "模拟单位"
+        },
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/gaw/org/getOrgInfo",
+      "description": "统一组织机构信息",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": {
+          "parentId": "",
+          "id": "{{randomId}}",
+          "orgCode": "620000040000",
+          "departName": "模拟单位"
+        },
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/msg/send",
+      "description": "统一消息发送",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": "",
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sys/token/exchange",
+      "description": "子系统token互通",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": "mock_exchanged_token_{{randomId}}",
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/duty/getDutyInfo",
+      "description": "获取值班信息",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": [],
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/jwy/app/token",
+      "description": "JWY创建应用令牌",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": "mock_app_token_{{randomId}}",
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/jwy/user/token",
+      "description": "JWY创建用户令牌",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": "mock_user_token_{{randomId}}",
+        "timestamp": "{{timestamp}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/jwy/user/info",
+      "description": "JWY获取用户信息",
+      "response": {
+        "success": true,
+        "message": "",
+        "code": 200,
+        "result": {
+          "code": "123456",
+          "sfzh": "620102199509275310",
+          "name": "张三",
+          "departCode": "620000040000",
+          "departName": "模拟单位"
+        },
+        "timestamp": "{{timestamp}}"
+      }
+    }
+  ]
+}

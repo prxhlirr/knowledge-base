@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "message": "",
+  "code": 200,
+  "result": [
+    { "id": "b4b576c57df94ee0abe4850544da605c", "sex_dictText": "男", "idCard": "620102199509275310", "type": "1", "officePhone": "80082088811", "mobilePhone": "13800138000", "departCode": "620000040000", "departCode_dictText": "模拟单位1", "name": "张三", "sex": "1", "photo": "", "updateTime": "2026-01-26 17:53:05", "createTime": "2023-07-12 09:45:53", "post": "模拟岗位", "indentity": "1", "indentity_dictText": "民警", "peopleStatus": "zz", "peopleStatus_dictText": "在职", "birthday": "1995-09-27", "code": "123456", "ethnicity": "01", "ethnicity_dictText": "汉族", "mariatal": "10", "mariatal_dictText": "未婚", "type_dictText": "领导", "positionRank": "ky", "age": "30" }
+  ],
+  "timestamp": "{{timestamp}}"
+}

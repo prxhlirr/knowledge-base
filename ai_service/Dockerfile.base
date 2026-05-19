@@ -1,0 +1,21 @@
+# ── AI Service 系统环境基础镜像（离线加固版） ──
+# 目的：将耗时的 apt-get install 步骤（LibreOffice, OpenCV 依赖等）固化到基础镜像中。
+# 构建方法：docker build -t ai-service-base:1.0.0 -f Dockerfile.base .
+FROM python:3.10-slim
+
+# 设置镜像源并安装系统库
+RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources \
+    && sed -i 's/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources || true \
+    && echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries \
+    && apt-get update && apt-get install -y --no-install-recommends --fix-missing \
+    libgomp1 \
+    libmagic1 \
+    antiword \
+    libgl1 \
+    libglib2.0-0 \
+    libreoffice-nogui \
+    && rm -rf /var/lib/apt/lists/*
+
+# 预创建用户和工作目录
+RUN useradd -m -u 1000 appuser && mkdir -p /app && chown appuser:appuser /app
+WORKDIR /app

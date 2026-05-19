@@ -1,0 +1,46 @@
+﻿{
+  "success": true,
+  "message": "login success",
+  "code": 200,
+  "result": {
+    "token": "{{token}}",
+    "expireAt": "{{expireAt}}",
+    "multi_depart": 1,
+    "userInfo": {
+      "id": "{{userId}}",
+      "username": "{{username}}",
+      "realname": "{{realname}}",
+      "avatar": "",
+      "birthday": null,
+      "sex": 1,
+      "phone": "{{phone}}",
+      "workNo": "{{workNo}}",
+      "orgCode": "{{orgCode}}",
+      "orgCodeTxt": "{{orgName}}",
+      "status": 1
+    },
+    "loginUser": {
+      "id": "{{userId}}",
+      "username": "{{username}}",
+      "realname": "{{realname}}",
+      "phone": "{{phone}}",
+      "orgCode": "{{orgCode}}",
+      "orgName": "{{orgName}}",
+      "loginRelation": {
+        "token": "{{token}}",
+        "multiDepart": true,
+        "sysDepartModel": {
+          "id": "698107423277187072",
+          "parentId": "698107103444729856",
+          "departName": "{{orgName}}",
+          "departNameAbbr": "Mock Dept",
+          "orgCategory": "2",
+          "orgType": "11",
+          "orgCode": "{{orgCode}}"
+        }
+      },
+      "lastLoginTime": "{{datetime}}"
+    }
+  },
+  "timestamp": "{{timestamp}}"
+}

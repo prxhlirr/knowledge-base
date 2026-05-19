@@ -1,0 +1,208 @@
+spring:
+  profiles:
+    active: dev
+  application:
+    name: java-service
+
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/kb_engine?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true}
+    username: ${SPRING_DATASOURCE_USERNAME:root}
+    password: ${SPRING_DATASOURCE_PASSWORD:root}
+
+  redis:
+    host: ${SPRING_REDIS_HOST:localhost}
+    port: ${SPRING_REDIS_PORT:6379}
+    password: ${SPRING_REDIS_PASSWORD:}
+    database: ${SPRING_REDIS_DATABASE:0}
+    timeout: 5000ms
+
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+
+  # ────────────── 存储服务配置 ──────────────
+  storage:
+    storage-type: minio
+
+xxl:
+  job:
+    enabled: ${XXL_JOB_ENABLED:false}
+
+mybatis-plus:
+  # classpath*:mapper/**/*.xml 支持子目录下的所有 XML（如 mapper/SysOperationLogMapper.xml）
+  mapper-locations: classpath*:mapper/**/*.xml
+  global-config:
+    db-config:
+      id-type: auto
+
+
+
+
+  # [Kafka 接入] 启用 Kafka 消费者，消费外部系统推送的文档通知
+  kafka:
+    bootstrap-servers: ${KAFKA_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_GROUP_ID:kb-doc-ingest}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # 每次最多拉取 10 条，防止 SFTP 下载阻塞消费线程
+      max-poll-records: 10
+    producer:
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+# [A-4 修复] SFTP 凭据改为配置文件管理，移除接口明文密码
+# 生产环境通过环境变量注入：SFTP_PASSWORD=xxx
+sftp:
+  known-hosts-path: ${SFTP_KNOWN_HOSTS_PATH:~/.ssh/known_hosts}
+  # 预配置的服务器凭据，key=credentialId（由业务管理员分配）
+  credentials:
+    fileserver-prod:
+      host: ${SFTP_FS_HOST:file-server.internal}
+      port: ${SFTP_FS_PORT:22}
+      user: ${SFTP_FS_USER:sftp-reader}
+      password: ${SFTP_FS_PASSWORD:change-me}
+    fileserver-dev:
+      host: localhost
+      port: 22
+      user: dev
+      password: ${SFTP_DEV_PASSWORD:dev-password}
+
+# Kafka Topic 配置（与业务侧约定的 Topic 名称）
+kafka:
+  topic:
+    doc-notify: ${KAFKA_TOPIC_DOC_NOTIFY:kb.doc.notify}
+
+# 内部服务凭证（P0-1：从代码硬编码迁移至配置，生产环境必须通过 KB_INTERNAL_TOKEN 环境变量覆盖）
+kb:
+  internal:
+    token: ${KB_INTERNAL_TOKEN:kb-dev-token-change-me-in-prod}
+
+# 搜索服务安全配置（P0-6 / P1-3）
+search:
+  # 强制使用 V2 Pipeline 重构架构，彻底摒弃旧的 SearchService
+  use-v2: true
+  # 生产环境设为 true，要求网关注入 X-Gateway-Signature；开发环境设为 false 跳过校验
+  trust-gateway-headers: false
+  # Search total SLA timeout in milliseconds.
+  total:
+    sla-ms: 10000
+
+qa:
+  answer:
+    prompt-max-chars: ${QA_PROMPT_MAX_CHARS:12000}
+    ai-service-url: ${QA_AI_SERVICE_URL:http://localhost:8000}
+    stream-timeout-ms: ${QA_STREAM_TIMEOUT_MS:30000}
+    # stream-chunk-buffer-size: 5
+    # ────────────── 问答结构化提示词流 ──────────────
+    structured-prompt:
+      fact-extractor-system: ${QA_STRUCTURED_FACT_SYSTEM:你是知识库问答的事实抽取器。只从给定证据中抽取可审计事实，返回严格 JSON，不要直接回答用户。}
+      fact-extractor-user-template: |
+        请从证据中抽取事实。JSON schema: {"facts":[{"fact_id":"F1","type":"general|person_position_event|condition|procedure|quantity|time|policy","subject":"","predicate":"","object":"","status":"PROPOSED|CANDIDATE|PUBLIC_NOTICE|APPOINTED|CURRENT|REMOVED|HISTORICAL|UNKNOWN","time":"","quantity":"","text":"短事实","evidence_id":"E1","citation_index":1,"risk_tags":[]}],"warnings":[]}。
+        {{payload}}
+      claim-plan-system: ${QA_STRUCTURED_CLAIM_SYSTEM:你是知识库问答的结论规划器。只依据已抽取事实生成可审计 claim_plan，返回严格 JSON，不要引入事实外的人名、时间、数量、状态或结论。}
+      claim-plan-user-template: |
+        请生成 claim_plan。JSON schema: {"answerable":true,"direct_answer":"","claims":[{"claim_id":"C1","claim_text":"简短结论","supporting_fact_ids":["F1"],"citation_indexes":[1],"risk_level":"normal|high","answerable":true}],"missing_evidence":[],"conflicts":[]}。
+        {{payload}}
+      render-system: ${QA_STRUCTURED_RENDER_SYSTEM:你是知识库问答渲染器。只能依据已审核的 claim_plan 生成最终中文答案；不要新增实体、日期、数量、状态判断、原因或结论；不要输出 user、assistant、system 等角色标签。}
+      render-user-template: |
+        请根据已审核的 claim_plan 生成简洁中文答案。只输出最终答案文本，不输出聊天记录。每个关键结论用自然语言表达，不要输出引用编号、引用占位符或参考资料清单。
+        JSON input:
+        {{payload}}
+    risk-policy:
+      promotion-query-terms: ${QA_PROMOTION_QUERY_TERMS:晋升,升任,提拔,提任}
+      promotion-evidence-terms: ${QA_PROMOTION_EVIDENCE_TERMS:晋升,升任,提拔,提任,任命,决定任职,正式任职,任职通知}
+      promotion-missing-aspect: ${QA_PROMOTION_MISSING_ASPECT:promotion_not_explicit}
+      promotion-insufficient-instruction: ${QA_PROMOTION_INSUFFICIENT:请先说明材料没有明确确认相关状态。如果材料出现拟任或现任等信息，只能表述为材料提到的任职变动信息，不得改写为已发生事实。}
+
+editor:
+  similarity:
+    min-input-chars: ${EDITOR_SIMILARITY_MIN_INPUT_CHARS:5}
+    max-input-chars: ${EDITOR_SIMILARITY_MAX_INPUT_CHARS:4000}
+    min-score: ${EDITOR_SIMILARITY_MIN_SCORE:0.55}
+    cache-ttl-seconds: ${EDITOR_SIMILARITY_CACHE_TTL_SECONDS:60}
+
+# [A-1 修复] CORS 来源白名单，允许本地开发环境及内网域名访问
+# 跨域白名单（多个域名用逗号分隔）
+cors:
+  allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://127.0.0.1:3000,http://127.0.0.1:8080,http://localhost:8080,http://localhost:5173}
+  allowed-methods: GET,POST,PUT,DELETE,OPTIONS
+  allowed-headers: Content-Type,Authorization,X-Gateway-Signature
+  allow-credentials: true
+  max-age: 3600
+
+# ────────────── JWT 验签配置 ──────────────
+# 针对搜索及问答等高价值 API 进行 JWT 验签拦截，保护核心数据资产
+# 验签失败将统一返回 HTTP 401 Unauthorized 状态码
+jwt:
+  # 是否启用 JWT 验证拦截器：true = 拦截并验签（高安全模式）；false = 跳过拦截器（开发免验签）
+  dev-mode: ${JWT_DEV_MODE:true}
+  # JWT 传输载体 Header 名称，通常为 Authorization，格式为 Bearer <token>
+  header: ${JWT_HEADER:Authorization}
+  # HS256 对称加密密钥，长度必须至少 32 字节，生产环境必须使用环境变量 JWT_SECRET 覆盖
+  secret: ${JWT_SECRET:default-dev-secret-must-change-in-prod-32chars}
+  # RS256 签名证书 Base64 编码，若配置则优先采用 RS256 进行验签，否则采用 HS256
+  public-key-base64: ${JWT_PUBLIC_KEY_BASE64:}
+  # JWT Claims 映射的属性字段名，用于从 Token 中提取用户 ID、部门编码和应用编码
+  claim:
+    user-id:   ${JWT_CLAIM_USER_ID:userId}
+    dept-code: ${JWT_CLAIM_DEPT_CODE:deptCode}
+    app-code:  ${JWT_CLAIM_APP_CODE:appCode}
+
+# ────────────── 外部机构同步接口配置 ──────────────
+external:
+  org:
+    api:
+      # 外部机构 management system 部门树接口（返回 JSON 数组，元素含 deptCode/name/parentCode）
+      # 生产环境由外部同步计划任务每小时触发，同步状态写入本地 Redis 缓存
+      dept-tree-url: ${EXT_ORG_DEPT_TREE_URL:}
+      # 同步接口的安全凭据，支持 Bearer Token 或 API Key
+      token: ${EXT_ORG_API_TOKEN:}
+    # 是否启用开发环境 mock 数据：true=调用本地模拟接口返回 mock 部门树；false=真实调用外部接口
+    dev-mode: ${EXT_ORG_DEV_MODE:true}
+    # 同步任务开启/关闭开关
+    sync:
+      enabled: ${EXT_ORG_SYNC_ENABLED:true}
+    # 部门树同步定时任务 Cron 表达式（默认每天凌晨整点同步一次）
+    sync-cron: ${EXT_ORG_SYNC_CRON:0 0 * * * ?}
+
+# ────────────── 审计日志配置 ──────────────
+log:
+  operation:
+    # 接口请求审计日志，接口返回结果的最大记录字节数，防止日志 file 占用过大
+    response-max-bytes: ${LOG_OP_RESPONSE_MAX_BYTES:4096}
+    # 接口请求体最大记录字节数
+    request-max-bytes: ${LOG_OP_REQUEST_MAX_BYTES:2048}
+    # 异步记录审计日志的线程池核心线程数
+    async-pool-size: ${LOG_OP_ASYNC_POOL_SIZE:3}
+
+# ────────────── 日志文件存储及滚存策略 ──────────────
+# 运行日志输出目录，本地开发环境下默认为 java_service/logs/
+# 容器部署时建议配置为挂载的持久化卷，如 /app/logs
+logging:
+  file:
+    # 日志输出的完整路径及文件名，本地开发默认输出在 java_service 根目录下
+    name: ${LOG_FILE_PATH:logs}/java_service.log
+  logback:
+    rollingpolicy:
+      # 单个日志文件大小最大限制，超过 50MB 将触发日志文件滚动备份
+      max-file-size: 50MB
+      # 日志滚动备份文件的最大保留天数（只保留 7 天内的日志）
+      max-history: 7
+      # 所有滚动备份日志文件占用的总磁盘空间上限，达到 500MB 后将自动清理最旧的备份
+      total-size-cap: 500MB
+  # 全局及应用级别包路径的日志记录级别，本地开发 com.boyang 设为 debug 以便于排查 SQL
+  level:
+    root: ${LOG_LEVEL_ROOT:info}
+    com.boyang: ${LOG_LEVEL_APP:debug}
+
+# ────────────── 知识库系统特化配置 ──────────────
+knowledge:
+  base:
+    storage-type: minio
+
+
