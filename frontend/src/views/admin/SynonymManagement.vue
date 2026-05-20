@@ -143,8 +143,9 @@
 <script setup>
 import { ref, onMounted } from 'vue';
 import axios from 'axios';
+import { API_BASE } from '../../utils/apiBase';
 
-const BASE = `${import.meta.env.VITE_API_BASE_URL}/admin/synonyms`;
+const BASE = `${API_BASE}/admin/synonyms`;
 
 const synonymList = ref([]);
 const loading = ref(true);

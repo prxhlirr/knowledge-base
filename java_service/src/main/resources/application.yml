@@ -92,11 +92,25 @@ search:
   total:
     sla-ms: 10000
 
+ai:
+  service:
+    # Backward-compatible default. In single-node mode only AI_SERVICE_HOST is needed.
+    host: ${AI_SERVICE_HOST:http://127.0.0.1:8001}
+    # Distributed offline GPU mode: route each capability to a dedicated AI node.
+    embedding-host: ${AI_EMBEDDING_HOST:${AI_SERVICE_HOST:http://127.0.0.1:8001}}
+    rerank-host: ${AI_RERANK_HOST:${AI_SERVICE_HOST:http://127.0.0.1:8001}}
+    colbert-host: ${AI_COLBERT_HOST:${AI_EMBEDDING_HOST:${AI_SERVICE_HOST:http://127.0.0.1:8001}}}
+    llm-host: ${AI_LLM_HOST:${AI_SERVICE_HOST:http://127.0.0.1:8001}}
+    ltr-host: ${AI_LTR_HOST:${AI_SERVICE_HOST:http://127.0.0.1:8001}}
+
 qa:
   answer:
-    prompt-max-chars: ${QA_PROMPT_MAX_CHARS:12000}
+    prompt-max-chars: ${QA_PROMPT_MAX_CHARS:6000}
+    max-tokens: ${QA_LLM_MAX_TOKENS:600}
+    connect-timeout-ms: ${QA_LLM_CONNECT_TIMEOUT_MS:5000}
+    read-timeout-ms: ${QA_LLM_READ_TIMEOUT_MS:60000}
     ai-service-url: ${QA_AI_SERVICE_URL:http://localhost:8000}
-    stream-timeout-ms: ${QA_STREAM_TIMEOUT_MS:30000}
+    stream-timeout-ms: ${QA_STREAM_TIMEOUT_MS:70000}
     # stream-chunk-buffer-size: 5
     # ────────────── 问答结构化提示词流 ──────────────
     structured-prompt:
@@ -204,5 +218,3 @@ logging:
 knowledge:
   base:
     storage-type: minio
-
-

@@ -31,6 +31,9 @@ public class SysSearchTagServiceImpl extends ServiceImpl<SysSearchTagMapper, Sys
     @Value("${ai.service.host:http://127.0.0.1:8001}")
     private String aiHost;
 
+    @Value("${ai.service.embedding-host:http://127.0.0.1:8001}")
+    private String embeddingHost;
+
     private final RestTemplate restTemplate;
 
     public SysSearchTagServiceImpl() {
@@ -47,7 +50,8 @@ public class SysSearchTagServiceImpl extends ServiceImpl<SysSearchTagMapper, Sys
         try {
             Map<String, String> requestPayload = new HashMap<>();
             requestPayload.put("text", text);
-            String url = aiHost.replace("localhost", "127.0.0.1") + "/api/ai/vector/query";
+            String host = (embeddingHost == null || embeddingHost.trim().isEmpty()) ? aiHost : embeddingHost;
+            String url = host.replace("localhost", "127.0.0.1") + "/api/ai/vector/query";
             String respJson = restTemplate.postForObject(url, requestPayload, String.class);
 
             ObjectMapper mapper = new ObjectMapper();

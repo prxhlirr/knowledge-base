@@ -123,6 +123,7 @@
 <script setup>
 import { ref, computed } from 'vue';
 import axios from 'axios';
+import { API_BASE } from '../../utils/apiBase';
 
 const activeTab = ref('compare'); // 'compare' 或 'scan'
 
@@ -139,7 +140,7 @@ const runCompare = async () => {
   comparing.value = true;
   compareResult.value = null;
   try {
-    const res = await axios.post(`${import.meta.env.VITE_API_BASE_URL}/admin/similarity/compare`, {
+    const res = await axios.post(`${API_BASE}/admin/similarity/compare`, {
       textA: compareForm.value.textA,
       textB: compareForm.value.textB
     });
@@ -192,7 +193,7 @@ const runScan = async () => {
   scanning.value = true;
   scanResult.value = null;
   try {
-    const res = await axios.post(`${import.meta.env.VITE_API_BASE_URL}/admin/similarity/corpus-scan`, {
+    const res = await axios.post(`${API_BASE}/admin/similarity/corpus-scan`, {
       queryText: scanForm.value.query,
       limit: 500 // 默认扫 500 条
     });
@@ -236,7 +237,7 @@ const handleViewSource = async (doc) => {
     if (doc.docId) params.append('docId', doc.docId);
     if (doc.source) params.append('sourceName', doc.source);
     
-    const res = await axios.get(`${import.meta.env.VITE_API_BASE_URL}/file/preview?${params.toString()}`);
+    const res = await axios.get(`${API_BASE}/file/preview?${params.toString()}`);
     if (res.data.code === 200 && res.data.data && res.data.data.url) {
       window.open(res.data.data.url, '_blank');
     } else {

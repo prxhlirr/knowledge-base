@@ -70,6 +70,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { API_BASE } from '../../utils/apiBase'
 
 const tagList = ref([])
 const total = ref(0)
@@ -81,7 +82,7 @@ const syncingId = ref(null)
 const fetchTagList = async () => {
   loading.value = true
   try {
-    const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/admin/tags/list?current=${currentPage.value}&size=${pageSize.value}`)
+    const res = await fetch(`${API_BASE}/admin/tags/list?current=${currentPage.value}&size=${pageSize.value}`)
     const data = await res.json()
     if (data.code === 200) {
       tagList.value = data.data.records
@@ -101,7 +102,7 @@ const syncTag = async (item) => {
   
   syncingId.value = item.id
   try {
-    const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/admin/tags/${item.id}/sync`, {
+    const res = await fetch(`${API_BASE}/admin/tags/${item.id}/sync`, {
       method: 'POST'
     })
     const data = await res.json()

@@ -109,20 +109,24 @@ class ModelManager:
     def _get_cuda_options(self, device_id: int):
         """抽取 CUDA 配置逻辑，便于多卡复用"""
         try:
-            import subprocess as _sp
-            _nv = _sp.run(
-                ['nvidia-smi', f'--id={device_id}',
-                 '--query-gpu=memory.free',
-                 '--format=csv,noheader,nounits'],
-                capture_output=True, text=True, timeout=5
-            )
-            if _nv.returncode == 0:
-                _free_mb = int(_nv.stdout.strip())
-                _gpu_mem_limit = int(_free_mb * 0.8) * 1024 * 1024
+            _configured_gb = os.getenv('ORT_GPU_MEM_LIMIT_GB', '').strip()
+            if _configured_gb:
+                _gpu_mem_limit = int(float(_configured_gb) * 1024 ** 3)
             else:
-                _gpu_mem_limit = int(os.getenv('ORT_GPU_MEM_LIMIT_GB', '4')) * 1024 ** 3
+                import subprocess as _sp
+                _nv = _sp.run(
+                    ['nvidia-smi', f'--id={device_id}',
+                     '--query-gpu=memory.free',
+                     '--format=csv,noheader,nounits'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if _nv.returncode == 0:
+                    _free_mb = int(_nv.stdout.strip())
+                    _gpu_mem_limit = int(_free_mb * 0.6) * 1024 * 1024
+                else:
+                    _gpu_mem_limit = 3 * 1024 ** 3
         except Exception:
-            _gpu_mem_limit = int(os.getenv('ORT_GPU_MEM_LIMIT_GB', '4')) * 1024 ** 3
+            _gpu_mem_limit = int(float(os.getenv('ORT_GPU_MEM_LIMIT_GB', '3'))) * 1024 ** 3
 
         return {
             'device_id': device_id,
@@ -849,6 +853,7 @@ class ModelManager:
             "reranker_loaded": reranker_loaded,
             "acceleration": dev.upper(),
             "device": dev,
+            "reranker_device": getattr(self, "reranker_device", "CPU"),
             "providers": self.model.get_providers() if getattr(self, "model", None) else [],
             "reranker_providers": self.reranker.get_providers() if getattr(self, "reranker", None) else [],
             "last_used_at": getattr(self, "last_used_at", 0.0),

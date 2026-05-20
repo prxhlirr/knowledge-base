@@ -36,11 +36,51 @@ ltr_manager = LTRManager()
 import threading
 from task_worker import main as run_worker
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+
+def _configured_capabilities() -> set:
+    raw = os.getenv("AI_CAPABILITIES", os.getenv("AI_SERVICE_ROLE", "all"))
+    values = {part.strip().lower() for part in re.split(r"[,; ]+", raw or "") if part.strip()}
+    if not values or "all" in values:
+        return {"embedding", "rerank", "colbert", "llm", "ocr", "nlp", "ltr", "qa"}
+    aliases = {
+        "embed": "embedding",
+        "vector": "embedding",
+        "reranker": "rerank",
+        "llm-proxy": "llm",
+        "chat": "llm",
+        "index": "worker",
+        "ingest": "worker",
+    }
+    expanded = {aliases.get(item, item) for item in values}
+    if "embedding" in expanded:
+        expanded.update({"colbert", "qa"})
+    if "colbert" in expanded or "qa" in expanded:
+        expanded.add("embedding")
+    return expanded
+
+AI_CAPABILITIES = _configured_capabilities()
+
+def _has_capability(name: str) -> bool:
+    return name.lower() in AI_CAPABILITIES
+
+def _require_capability(name: str):
+    if not _has_capability(name):
+        raise HTTPException(
+            status_code=503,
+            detail=f"AI capability '{name}' is disabled on this instance"
+        )
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if os.getenv("AI_MODEL_PRELOAD", "false").lower() == "true":
         print("🚀 [Lifespan] AI_MODEL_PRELOAD=true，主动预加载 AI 模型层 (Embedding & Reranker)...")
-        model_manager.load_model()
+        print(f"[Lifespan] AI_MODEL_PRELOAD=true, capabilities={sorted(AI_CAPABILITIES)}")
+        if _has_capability("embedding") or _has_capability("colbert") or _has_capability("qa"):
+            model_manager.load_embedding_model()
+        if _has_capability("rerank"):
+            model_manager.load_reranker_model()
     else:
         print("ℹ️ [Lifespan] AI_MODEL_PRELOAD=false，模型将在首次 encode/rerank 时懒加载")
 
@@ -99,7 +139,11 @@ async def lifespan(app: FastAPI):
         print("❌ [Watchdog] task_worker 连续重启次数已达上限，停止自动重启。请检查服务配置。")
 
     print("🚀 [Lifespan] 启动 Redis 文档转化队列监听后台线程（含 Watchdog 守护重启）...")
-    threading.Thread(target=_worker_watchdog, daemon=True, name="task-worker-watchdog").start()
+    if _env_bool("AI_START_WORKER", False) or _has_capability("worker"):
+        print("[Lifespan] Starting Redis document worker watchdog.")
+        threading.Thread(target=_worker_watchdog, daemon=True, name="task-worker-watchdog").start()
+    else:
+        print("[Lifespan] AI_START_WORKER=false; this API instance will not consume ingest jobs.")
 
     yield
     print("🛑 [Lifespan] 服务关闭清理资源...")
@@ -212,6 +256,7 @@ def encode_query_cached(text: str, skip_instruction: bool = False):
 
 @app.post("/api/ai/vector/query")
 def encode_query(req: QueryRequest):
+    _require_capability("embedding")
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Query text cannot be empty")
         
@@ -255,6 +300,7 @@ def _encode_sparse_cached(text: str) -> str:
 
 @app.post("/api/ai/vector/sparse")
 def encode_sparse_query(req: QueryRequest):
+    _require_capability("embedding")
     """
     业务功能：返回查询文本的 BGE-M3 稀疏向量（SPLADE 风格），兼容 ES rank_features 格式。
     核心原理：
@@ -298,6 +344,7 @@ def encode_sparse_query(req: QueryRequest):
 
 @app.post("/api/ai/vector/dual")
 def encode_dual_vector(req: QueryRequest):
+    _require_capability("embedding")
     """
     业务功能：单次请求同时返回 dense（稠密）+ sparse（稀疏）双模向量。
     [P0 修复] 原实现是"假 dual"：内部调用 encode_query_cached + _encode_sparse_cached，
@@ -348,6 +395,7 @@ def encode_dual_vector(req: QueryRequest):
 
 @app.post("/api/ai/vector/long-doc")
 def encode_long_doc(req: QueryRequest):
+    _require_capability("embedding")
     """
     业务功能：对超长文本（文档级）做均值池化向量化，返回文档级 doc_vector。
     核心原理：BGE-M3 输入长度限制约 512 token（约 350-400 中文字），超长文本无法直接编码。
@@ -431,6 +479,8 @@ _llm_rerank_cache: dict = {}
 
 @app.post("/api/ai/vector/hyde")
 def encode_hyde(req: QueryRequest):
+    _require_capability("embedding")
+    _require_capability("llm")
     """
     业务功能：HyDE（Hypothetical Document Embedding）向量化接口
     核心原理：用 LLM 将短 query 扩展为「假设文档」，再用 BGE-M3 对假设文档编码。
@@ -519,6 +569,7 @@ class ColbertRequest(BaseModel):
 
 @app.post("/api/ai/colbert/score")
 def colbert_score(req: ColbertRequest):
+    _require_capability("colbert")
     """
     业务功能：ColBERT Late Interaction MaxSim 评分接口
     核心原理：BGE-M3 已输出 last_hidden_state（token 级向量），
@@ -575,6 +626,7 @@ class LlmRerankRequest(BaseModel):
 
 @app.post("/api/ai/llm/rerank")
 def llm_rerank(req: LlmRerankRequest):
+    _require_capability("llm")
     """
     业务功能：LLM 大模型语义重排接口
     核心原理：使用 qwen2.5:7b 对候选文档与查询的相关性进行批量评分（0-10分）。
@@ -667,6 +719,7 @@ def llm_rerank(req: LlmRerankRequest):
 
 @app.post("/api/ai/rerank")
 def rerank_documents(req: RerankRequest):
+    _require_capability("rerank")
     """
     业务功能：对初筛结果进行 Cross-Encoder 深度重排 (带结果缓存优化)
     """
@@ -703,6 +756,7 @@ def rerank_documents(req: RerankRequest):
 
 @app.post("/api/ai/rerank/document-similarity")
 def rerank_document_similarity(req: DocumentSimilarityRerankRequest):
+    _require_capability("rerank")
     """
     Document-level similarity rerank for editor recommendations.
 
@@ -736,6 +790,7 @@ def rerank_document_similarity(req: DocumentSimilarityRerankRequest):
 
 @app.post("/api/ai/rerank/sentences")
 def rerank_sentences(req: SentenceScoresRequest):
+    _require_capability("rerank")
     """
     业务功能：对搜索结果中的句子进行批量打分，用于选择最佳高亮片段
     """
@@ -766,13 +821,50 @@ def health_check():
     - 其他模式：rerankLimit=50（GPU 充沛环境）
     """
     status = model_manager.get_health_status()
+    embedding_enabled = _has_capability("embedding") or _has_capability("colbert") or _has_capability("qa")
+    rerank_enabled = _has_capability("rerank")
+    worker_enabled = _env_bool("AI_START_WORKER", False) or _has_capability("worker")
+    capabilities = {
+        "embedding": {
+            "enabled": embedding_enabled,
+            "loaded": status.get("embedding_loaded", False),
+            "device": status.get("device", "CPU"),
+            "providers": status.get("providers", [])
+        },
+        "colbert": {
+            "enabled": _has_capability("colbert"),
+            "loaded": status.get("embedding_loaded", False),
+            "device": status.get("device", "CPU")
+        },
+        "rerank": {
+            "enabled": rerank_enabled,
+            "loaded": status.get("reranker_loaded", False),
+            "device": status.get("reranker_device", status.get("device", "CPU")),
+            "providers": status.get("reranker_providers", [])
+        },
+        "llm": {
+            "enabled": _has_capability("llm"),
+            "url": os.getenv("LLM_API_URL", "")
+        },
+        "ocr": {
+            "enabled": _has_capability("ocr"),
+            "use_gpu": _env_bool("OCR_USE_GPU", False),
+            "gpu_id": os.getenv("OCR_GPU_ID", os.getenv("ORT_CUDA_DEVICE_ID", "0"))
+        },
+        "worker": {
+            "enabled": worker_enabled
+        }
+    }
     return {
         "status": "ok",
         "model_loaded": status.get("model_loaded", False),
         "reranker_loaded": status.get("reranker_loaded", False),
         "acceleration": status.get("acceleration", "CPU"),
         "device": status.get("device", "CPU"),
-        "providers": status.get("providers", [])
+        "providers": status.get("providers", []),
+        "capabilities": capabilities,
+        "enabled_capabilities": sorted(AI_CAPABILITIES),
+        "worker_enabled": worker_enabled
     }
 
 @app.post("/api/ai/config/reload")
@@ -791,6 +883,7 @@ intent_cache = {}
 
 @app.post("/api/ai/intent/rewrite")
 def rewrite_intent(req: IntentRewriteRequest):
+    _require_capability("llm")
     """
     业务功能：基于本地大模型执行动态意图重写（Few-Shot 提取核心名词）
     """
@@ -867,6 +960,8 @@ _rewrite_hyde_cache: dict = {}
 
 @app.post("/api/ai/intent/rewrite_and_hyde")
 def rewrite_and_hyde(req: RewriteAndHydeRequest):
+    _require_capability("embedding")
+    _require_capability("llm")
     """
     业务功能：单次 LLM 调用同时完成「意图改写」和「HyDE 假设文档」生成，再对假设文档编码。
     关键流程：
@@ -1755,7 +1850,13 @@ def _post_llm_with_retry(llm_url, payload, headers, timeout, stream=False, max_r
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            return requests.post(llm_url, json=payload, headers=headers, stream=stream, timeout=timeout)
+            return requests.post(
+                llm_url,
+                json=payload,
+                headers=headers,
+                stream=stream,
+                timeout=_llm_timeout_tuple(timeout, stream=stream)
+            )
         except LLM_TRANSIENT_EXCEPTIONS as exc:
             last_error = exc
             if attempt >= max_retries:
@@ -1767,6 +1868,13 @@ def _post_llm_with_retry(llm_url, payload, headers, timeout, stream=False, max_r
         raise last_error
     raise RuntimeError("LLM request failed before execution")
 
+def _llm_timeout_tuple(timeout, stream=False):
+    connect_timeout = float(os.getenv("LLM_CONNECT_TIMEOUT", "10"))
+    default_read = "300" if stream else str(timeout)
+    read_env = "LLM_STREAM_READ_TIMEOUT" if stream else "LLM_READ_TIMEOUT"
+    read_timeout = float(os.getenv(read_env, default_read))
+    return (connect_timeout, max(float(timeout), read_timeout))
+
 def _extract_llm_stream_content(chunk: dict) -> str:
     """Extract visible answer text from common OpenAI-compatible stream shapes."""
     if not isinstance(chunk, dict):
@@ -1776,7 +1884,15 @@ def _extract_llm_stream_content(chunk: dict) -> str:
         first = choices[0] or {}
         delta = first.get("delta") or {}
         message = first.get("message") or {}
-        for value in (delta.get("content"), message.get("content"), first.get("text")):
+        for value in (
+            delta.get("content"),
+            delta.get("reasoning_content"),
+            delta.get("thinking"),
+            message.get("content"),
+            message.get("reasoning_content"),
+            message.get("thinking"),
+            first.get("text")
+        ):
             text = _normalize_llm_content_piece(value)
             if text:
                 return text
@@ -1784,8 +1900,12 @@ def _extract_llm_stream_content(chunk: dict) -> str:
     for value in (
         chunk.get("response"),
         chunk.get("content"),
+        chunk.get("reasoning_content"),
+        chunk.get("thinking"),
         chunk.get("text"),
         message.get("content") if isinstance(message, dict) else None,
+        message.get("reasoning_content") if isinstance(message, dict) else None,
+        message.get("thinking") if isinstance(message, dict) else None,
     ):
         text = _normalize_llm_content_piece(value)
         if text:
@@ -1818,7 +1938,8 @@ def _build_llm_payload(messages, model_key, temperature, max_tokens, stream):
         "max_tokens": max_tokens,
         "stream": stream
     }
-    if os.getenv("LLM_SEND_ENABLE_THINKING", "false").lower() == "true":
+    if os.getenv("LLM_SEND_THINK_FALSE", "false").lower() == "true":
+        payload["think"] = False
         payload["enable_thinking"] = False
     return llm_model, payload
 
@@ -1831,6 +1952,7 @@ def _llm_headers():
 
 @app.post("/api/ai/llm/chat")
 def chat(req: ChatRequest):
+    _require_capability("llm")
     llm_url = os.getenv("LLM_API_URL", "http://127.0.0.1:11434/v1/chat/completions")
     llm_model, payload = _build_llm_payload(
         req.messages,
@@ -1854,6 +1976,7 @@ def chat(req: ChatRequest):
 
 @app.post("/api/ai/llm/chat_stream")
 def chat_stream(req: ChatStreamRequest):
+    _require_capability("llm")
     """
     业务功能：通过大模型流式回答基于知识库检索结果的用户问题（RAG 问答）
     
@@ -1882,7 +2005,8 @@ def chat_stream(req: ChatStreamRequest):
         """
         try:
             emitted_content = False
-            with _post_llm_with_retry(llm_url, payload, _llm_headers(), timeout=120, stream=True) as resp:
+            stream_timeout = float(os.getenv("LLM_STREAM_READ_TIMEOUT", "300"))
+            with _post_llm_with_retry(llm_url, payload, _llm_headers(), timeout=stream_timeout, stream=True) as resp:
                 if resp.status_code != 200:
                     detail = ""
                     try:
@@ -1899,7 +2023,7 @@ def chat_stream(req: ChatStreamRequest):
                     yield f"data: [ERROR] {message}\n\n"
                     return
 
-                for line in resp.iter_lines():
+                for line in resp.iter_lines(chunk_size=1):
                     if not line:
                         continue
                     # SSE 格式：每行以 "data: " 开头
@@ -1914,8 +2038,15 @@ def chat_stream(req: ChatStreamRequest):
                         content_piece = _extract_llm_stream_content(chunk)
                         if content_piece:
                             # 剔除 Qwen3 系列残留的 <think>...</think> 片段
+                            original_piece = content_piece
                             if "<think>" in content_piece:
                                 content_piece = re.sub(r"<think>.*?</think>", "", content_piece, flags=re.DOTALL)
+                            
+                            # [架构加固防御] 若剔除思维链后变为空字符，但原始片段包含思维推理文本，
+                            # 此时我们优雅地保留并输出原始思维链，确保即使仅有思考输出或响应截断，也能平滑透传，不报空流错误！
+                            if not content_piece.strip() and original_piece.strip():
+                                content_piece = original_piece
+                                
                             if content_piece:
                                 emitted_content = True
                                 yield f"data: {json.dumps(content_piece, ensure_ascii=False)}\n\n"
@@ -1937,4 +2068,3 @@ if __name__ == "__main__":
     load_dotenv()
     port = int(os.getenv("AI_PORT", 8001))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
-

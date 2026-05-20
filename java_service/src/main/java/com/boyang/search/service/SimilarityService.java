@@ -45,6 +45,12 @@ public class SimilarityService {
     @Value("${ai.service.host:http://127.0.0.1:8001}")
     private String aiHost;
 
+    @Value("${ai.service.embedding-host:http://127.0.0.1:8001}")
+    private String embeddingHost;
+
+    @Value("${ai.service.rerank-host:http://127.0.0.1:8001}")
+    private String rerankHost;
+
     @Value("${editor.similarity.min-input-chars:80}")
     private int editorSimilarityMinInputChars;
 
@@ -69,6 +75,11 @@ public class SimilarityService {
         this.restTemplate = new RestTemplate(factory);
     }
 
+    private String normalizeBaseUrl(String host) {
+        String selected = (host == null || host.trim().isEmpty()) ? aiHost : host;
+        return selected.replace("localhost", "127.0.0.1");
+    }
+
     // ?
     // ?
     // ?
@@ -88,7 +99,7 @@ public class SimilarityService {
             payload.put("text_a", textA);
             payload.put("text_b", textB);
 
-            String url = aiHost.replace("localhost", "127.0.0.1") + "/api/ai/similarity/compare";
+            String url = normalizeBaseUrl(embeddingHost) + "/api/ai/similarity/compare";
             String respJson = restTemplate.postForObject(url, payload, String.class);
 
             Map<String, Object> respMap = objectMapper.readValue(respJson, Map.class);
@@ -241,7 +252,7 @@ public class SimilarityService {
             Map<String, Object> vectorPayload = new HashMap<>();
             vectorPayload.put("text", text);
 
-            String vectorUrl = aiHost.replace("localhost", "127.0.0.1") + "/api/ai/vector/long-doc";
+            String vectorUrl = normalizeBaseUrl(embeddingHost) + "/api/ai/vector/long-doc";
             String vectorRespJson = restTemplate.postForObject(vectorUrl, vectorPayload, String.class);
             Map<String, Object> vectorResp = objectMapper.readValue(vectorRespJson, Map.class);
 
@@ -367,7 +378,7 @@ public class SimilarityService {
             long vectorStart = System.currentTimeMillis();
             Map<String, Object> vectorPayload = new HashMap<>();
             vectorPayload.put("text", normalizedText);
-            String vectorUrl = aiHost.replace("localhost", "127.0.0.1") + "/api/ai/vector/long-doc";
+            String vectorUrl = normalizeBaseUrl(embeddingHost) + "/api/ai/vector/long-doc";
             String vectorRespJson = restTemplate.postForObject(vectorUrl, vectorPayload, String.class);
             Map<String, Object> vectorResp = objectMapper.readValue(vectorRespJson, Map.class);
             timings.put("vector_ms", System.currentTimeMillis() - vectorStart);
@@ -761,7 +772,7 @@ public class SimilarityService {
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("query", queryText);
             payload.put("documents", documents);
-            String url = aiHost.replace("localhost", "127.0.0.1") + "/api/ai/rerank/document-similarity";
+            String url = normalizeBaseUrl(rerankHost) + "/api/ai/rerank/document-similarity";
             String respJson = restTemplate.postForObject(url, payload, String.class);
             Map<String, Object> resp = objectMapper.readValue(respJson, Map.class);
             if (!Integer.valueOf(200).equals(resp.get("code"))) {

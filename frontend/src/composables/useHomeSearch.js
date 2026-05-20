@@ -1,4 +1,5 @@
 import { computed, reactive, ref } from 'vue'
+import { API_BASE } from '../utils/apiBase'
 
 function createSearchState() {
   return reactive({
@@ -97,9 +98,8 @@ export function useHomeSearch() {
     qa.stage = 'searching'
 
     try {
-      const apiBase = import.meta.env.VITE_API_BASE_URL || ''
       const appCode = import.meta.env.VITE_APP_CODE || 'ADMIN_MASTER_KEY'
-      const resp = await fetch(`${apiBase}/search/home`, {
+      const resp = await fetch(`${API_BASE}/search/home`, {
         method: 'POST',
         headers: authHeaders(appCode),
         signal: controller.signal,

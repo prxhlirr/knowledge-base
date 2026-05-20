@@ -33,6 +33,21 @@ public class AiEngineGateway {
     @Value("${ai.service.host:http://127.0.0.1:8001}")
     private String aiHost;
 
+    @Value("${ai.service.embedding-host:http://127.0.0.1:8001}")
+    private String embeddingHost;
+
+    @Value("${ai.service.rerank-host:http://127.0.0.1:8001}")
+    private String rerankHost;
+
+    @Value("${ai.service.llm-host:http://127.0.0.1:8001}")
+    private String llmHost;
+
+    @Value("${ai.service.colbert-host:http://127.0.0.1:8001}")
+    private String colbertHost;
+
+    @Value("${ai.service.ltr-host:http://127.0.0.1:8001}")
+    private String ltrHost;
+
     private RestTemplate defaultRestTemplate; // 3s/15s
     private RestTemplate fastRestTemplate; // 3s/5s （Rewrite/HyDE 合并专用）
     private RestTemplate llmRestTemplate; // 5s/60s （LLM Rerank 长时调用专用）
@@ -113,6 +128,31 @@ public class AiEngineGateway {
         return aiHost.replace("localhost", "127.0.0.1");
     }
 
+    private String normalizeBaseUrl(String host) {
+        String selected = (host == null || host.trim().isEmpty()) ? aiHost : host;
+        return selected.replace("localhost", "127.0.0.1");
+    }
+
+    private String getEmbeddingBaseUrl() {
+        return normalizeBaseUrl(embeddingHost);
+    }
+
+    private String getRerankBaseUrl() {
+        return normalizeBaseUrl(rerankHost);
+    }
+
+    private String getLlmBaseUrl() {
+        return normalizeBaseUrl(llmHost);
+    }
+
+    private String getColbertBaseUrl() {
+        return normalizeBaseUrl(colbertHost);
+    }
+
+    private String getLtrBaseUrl() {
+        return normalizeBaseUrl(ltrHost);
+    }
+
     /**
      * 获取 GPU 加速状态（带有 60s 本地缓存）
      */
@@ -120,15 +160,38 @@ public class AiEngineGateway {
         long now = System.currentTimeMillis();
         if (cachedAcceleration == null || (now - lastHealthCheckMs) > HEALTH_CACHE_TTL_MS) {
             try {
-                String statusUrl = getBaseUrl() + "/api/ai/health";
+                String statusUrl = getRerankBaseUrl() + "/api/ai/health";
                 Map<String, Object> health = defaultRestTemplate.getForObject(statusUrl, Map.class);
-                cachedAcceleration = (health != null) ? (String) health.getOrDefault("acceleration", "CPU") : "CPU";
+                cachedAcceleration = resolveCapabilityDevice(health, "rerank");
                 lastHealthCheckMs = now;
             } catch (Exception e) {
                 cachedAcceleration = "CPU"; // 退化为 CPU
             }
         }
         return cachedAcceleration;
+    }
+
+    @SuppressWarnings("unchecked")
+    private String resolveCapabilityDevice(Map<String, Object> health, String capability) {
+        if (health == null) {
+            return "CPU";
+        }
+        Object capabilitiesObj = health.get("capabilities");
+        if (capabilitiesObj instanceof Map) {
+            Object capabilityObj = ((Map<String, Object>) capabilitiesObj).get(capability);
+            if (capabilityObj instanceof Map) {
+                Map<String, Object> capabilityMap = (Map<String, Object>) capabilityObj;
+                if (Boolean.FALSE.equals(capabilityMap.get("enabled"))) {
+                    return "CPU";
+                }
+                Object device = capabilityMap.get("device");
+                if (device != null && !device.toString().trim().isEmpty()) {
+                    return device.toString().toUpperCase();
+                }
+            }
+        }
+        Object acceleration = health.get("acceleration");
+        return acceleration == null ? "CPU" : acceleration.toString().toUpperCase();
     }
 
     /**
@@ -138,7 +201,7 @@ public class AiEngineGateway {
         try {
             Map<String, String> payload = new HashMap<>();
             payload.put("text", text);
-            String url = getBaseUrl() + "/api/ai/nlp/normalize";
+            String url = getEmbeddingBaseUrl() + "/api/ai/nlp/normalize";
             String respJson = colbertRestTemplate.postForObject(url, payload, String.class);
 
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
@@ -186,7 +249,7 @@ public class AiEngineGateway {
             if (queryType != null && !queryType.isEmpty()) {
                 payload.put("query_type", queryType);
             }
-            String url = getBaseUrl() + "/api/ai/intent/rewrite_and_hyde";
+            String url = getEmbeddingBaseUrl() + "/api/ai/intent/rewrite_and_hyde";
 
             String respJson = fastRestTemplate.postForObject(url, payload, String.class);
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
@@ -232,7 +295,7 @@ public class AiEngineGateway {
         try {
             Map<String, String> payload = new HashMap<>();
             payload.put("text", text);
-            String url = getBaseUrl() + "/api/ai/vector/query";
+            String url = getEmbeddingBaseUrl() + "/api/ai/vector/query";
             String respJson = fastRestTemplate.postForObject(url, payload, String.class);
 
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
@@ -261,7 +324,7 @@ public class AiEngineGateway {
         try {
             Map<String, String> payload = new HashMap<>();
             payload.put("text", query);
-            String url = getBaseUrl() + "/api/ai/vector/hyde";
+            String url = getEmbeddingBaseUrl() + "/api/ai/vector/hyde";
             String respJson = defaultRestTemplate.postForObject(url, payload, String.class);
 
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
@@ -299,7 +362,7 @@ public class AiEngineGateway {
         try {
             Map<String, String> payload = new HashMap<>();
             payload.put("text", text);
-            String url = getBaseUrl() + "/api/ai/vector/sparse";
+            String url = getEmbeddingBaseUrl() + "/api/ai/vector/sparse";
             // [Bug 修复] 使用字段级 sparseRestTemplate，不再每次创建新对象
             String respJson = sparseRestTemplate.postForObject(url, payload, String.class);
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
@@ -346,7 +409,7 @@ public class AiEngineGateway {
             Map<String, Object> payload = new HashMap<>();
             payload.put("query", query);
             payload.put("documents", documents);
-            String url = getBaseUrl() + "/api/ai/colbert/score";
+            String url = getColbertBaseUrl() + "/api/ai/colbert/score";
             String respJson = defaultRestTemplate.postForObject(url, payload, String.class);
 
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
@@ -387,7 +450,7 @@ public class AiEngineGateway {
             Map<String, Object> payload = new HashMap<>();
             payload.put("query", query);
             payload.put("documents", documents);
-            String url = getBaseUrl() + "/api/ai/llm/rerank";
+            String url = getLlmBaseUrl() + "/api/ai/llm/rerank";
             String respJson = llmRestTemplate.postForObject(url, payload, String.class);
 
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
@@ -417,7 +480,7 @@ public class AiEngineGateway {
         try {
             Map<String, Object> payload = new HashMap<>();
             payload.put("features", features);
-            String url = getBaseUrl() + "/api/ai/ltr/rank";
+            String url = getLtrBaseUrl() + "/api/ai/ltr/rank";
             String respJson = ltrRestTemplate.postForObject(url, payload, String.class);
 
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
@@ -495,7 +558,7 @@ public class AiEngineGateway {
             payload.put("model_key", modelKey == null || modelKey.trim().isEmpty() ? "QA_LLM_MODEL" : modelKey);
             payload.put("temperature", temperature);
             payload.put("max_tokens", maxTokens);
-            String url = getBaseUrl() + "/api/ai/llm/chat";
+            String url = getLlmBaseUrl() + "/api/ai/llm/chat";
             String respJson = llmRestTemplate.postForObject(url, payload, String.class);
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
             if (respMap == null || !Integer.valueOf(200).equals(respMap.get("code"))) {
@@ -525,7 +588,7 @@ public class AiEngineGateway {
         payload.put("temperature", temperature);
         payload.put("max_tokens", maxTokens);
 
-        String url = getBaseUrl() + "/api/ai/llm/chat_stream";
+        String url = getLlmBaseUrl() + "/api/ai/llm/chat_stream";
         long startMs = System.currentTimeMillis();
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setRequestMethod("POST");
@@ -655,7 +718,7 @@ public class AiEngineGateway {
         try {
             Map<String, String> payload = new HashMap<>();
             payload.put("text", text);
-            String url = getBaseUrl() + "/api/ai/vector/dual";
+            String url = getEmbeddingBaseUrl() + "/api/ai/vector/dual";
             String respJson = fastRestTemplate.postForObject(url, payload, String.class);
 
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
@@ -744,7 +807,7 @@ public class AiEngineGateway {
             if (aclTokens != null && !aclTokens.isEmpty()) {
                 payload.put("acl_tokens", new java.util.ArrayList<>(aclTokens));
             }
-            String url = getBaseUrl() + "/api/ai/qa/search";
+            String url = getEmbeddingBaseUrl() + "/api/ai/qa/search";
             String respJson = fastRestTemplate.postForObject(url, payload, String.class);
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
             if (respMap != null && Integer.valueOf(200).equals(respMap.get("code"))) {
@@ -796,7 +859,7 @@ public class AiEngineGateway {
             if (aclTokensBm25 != null && !aclTokensBm25.isEmpty()) {
                 payload.put("acl_tokens", new java.util.ArrayList<>(aclTokensBm25));
             }
-            String url = getBaseUrl() + "/api/ai/qa/search/bm25";
+            String url = getEmbeddingBaseUrl() + "/api/ai/qa/search/bm25";
             String respJson = fastRestTemplate.postForObject(url, payload, String.class);
             Map<String, Object> respMap = mapper.readValue(respJson, Map.class);
             if (respMap != null && Integer.valueOf(200).equals(respMap.get("code"))) {

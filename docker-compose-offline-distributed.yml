@@ -1,0 +1,199 @@
+version: '3.8'
+
+# Offline distributed deployment template.
+#
+# Usage examples:
+#   Java/front server:
+#     docker compose -f docker-compose-offline-distributed.yml --profile app up -d
+#   Embedding GPU server:
+#     docker compose -f docker-compose-offline-distributed.yml --profile embedding up -d
+#   Rerank GPU server:
+#     docker compose -f docker-compose-offline-distributed.yml --profile rerank up -d
+#   OCR/ingestion worker GPU server:
+#     docker compose -f docker-compose-offline-distributed.yml --profile worker up -d
+#   Ollama LLM GPU server:
+#     docker compose -f docker-compose-offline-distributed.yml --profile llm up -d
+#
+# Put real server IPs in an adjacent .env file, for example:
+#   JAVA_SERVER_IP=10.0.0.10
+#   EMBEDDING_SERVER_IP=10.0.0.11
+#   RERANK_SERVER_IP=10.0.0.12
+#   LLM_PROXY_SERVER_IP=10.0.0.13
+#   OLLAMA_SERVER_IP=10.0.0.13
+#   WORKER_SERVER_IP=10.0.0.14
+
+x-ai-env: &ai-env
+    MODEL_BASE_PATH: /app/models/onnx_native
+    REDIS_HOST: ${REDIS_HOST:-${JAVA_SERVER_IP:-10.0.0.10}}
+    REDIS_PORT: ${REDIS_PORT:-6379}
+    REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    ES_HOST: ${ES_HOST:-http://${JAVA_SERVER_IP:-10.0.0.10}:9200}
+    JAVA_SERVICE_HOST: ${JAVA_SERVICE_HOST:-http://${JAVA_SERVER_IP:-10.0.0.10}:8080}
+    JAVA_API_BASE: ${JAVA_API_BASE:-http://${JAVA_SERVER_IP:-10.0.0.10}:8080/api/v1}
+    KB_INTERNAL_TOKEN: ${KB_INTERNAL_TOKEN:-kb-dev-token-change-me-in-prod}
+    LLM_API_URL: ${LLM_API_URL:-http://${OLLAMA_SERVER_IP:-10.0.0.13}:11434/v1/chat/completions}
+    LLM_CONNECT_TIMEOUT: ${LLM_CONNECT_TIMEOUT:-10}
+    LLM_READ_TIMEOUT: ${LLM_READ_TIMEOUT:-180}
+    LLM_STREAM_READ_TIMEOUT: ${LLM_STREAM_READ_TIMEOUT:-300}
+    LLM_SEND_ENABLE_THINKING: ${LLM_SEND_ENABLE_THINKING:-false}
+    LLM_SEND_THINK_FALSE: ${LLM_SEND_THINK_FALSE:-false}
+    AI_MODEL_IDLE_UNLOAD: ${AI_MODEL_IDLE_UNLOAD:-true}
+    AI_MODEL_IDLE_TTL_SECONDS: ${AI_MODEL_IDLE_TTL_SECONDS:-1800}
+    AI_MODEL_IDLE_CHECK_INTERVAL_SECONDS: ${AI_MODEL_IDLE_CHECK_INTERVAL_SECONDS:-60}
+    PADDLE_OCR_MODEL_DIR: /app/models/paddle_ocr
+    PADDLE_OCR_OFFLINE_STRICT: "true"
+    PYTHONIOENCODING: utf-8
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
+
+x-ai-common: &ai-common
+  image: knowledge-base-ai:1.0.0
+  restart: always
+  runtime: nvidia
+  volumes:
+    - ./ai_service/config:/app/config:ro
+    - ./models:/app/models:ro
+  environment:
+    <<: *ai-env
+  command: >
+    bash -c "python -m uvicorn main:app --host 0.0.0.0 --port 8001 --workers 1"
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/ai/health')"]
+    interval: 30s
+    timeout: 10s
+    start_period: 120s
+    retries: 3
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  knowledge-base-java:
+    profiles: ["app"]
+    image: knowledge-base-java:1.0.0
+    container_name: kb-java
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./java_service/config:/app/config:ro
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
+      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL:-jdbc:mysql://${MYSQL_HOST:-10.0.0.10}:${MYSQL_PORT:-3306}/${MYSQL_DB:-kb_engine}?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true}
+      SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME:-root}
+      SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD:-root}
+      SPRING_REDIS_HOST: ${REDIS_HOST:-10.0.0.10}
+      SPRING_REDIS_PORT: ${REDIS_PORT:-6379}
+      SPRING_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      AI_SERVICE_HOST: ${AI_SERVICE_HOST:-http://${EMBEDDING_SERVER_IP:-10.0.0.11}:8001}
+      AI_EMBEDDING_HOST: ${AI_EMBEDDING_HOST:-http://${EMBEDDING_SERVER_IP:-10.0.0.11}:8001}
+      AI_COLBERT_HOST: ${AI_COLBERT_HOST:-http://${EMBEDDING_SERVER_IP:-10.0.0.11}:8001}
+      AI_RERANK_HOST: ${AI_RERANK_HOST:-http://${RERANK_SERVER_IP:-10.0.0.12}:8001}
+      AI_LLM_HOST: ${AI_LLM_HOST:-http://${LLM_PROXY_SERVER_IP:-10.0.0.13}:8001}
+      KB_INTERNAL_TOKEN: ${KB_INTERNAL_TOKEN:-kb-dev-token-change-me-in-prod}
+      JWT_DEV_MODE: ${JWT_DEV_MODE:-true}
+      JWT_SECRET: ${JWT_SECRET:-default-dev-secret-must-change-in-prod-32chars}
+    restart: always
+
+  knowledge-base-frontend:
+    profiles: ["app"]
+    image: knowledge-base-frontend:1.0.0
+    container_name: frontend-web
+    ports:
+      - "80:80"
+    depends_on:
+      - knowledge-base-java
+    restart: always
+
+  ai-embedding:
+    <<: *ai-common
+    profiles: ["embedding"]
+    container_name: kb-ai-embedding
+    ports:
+      - "${AI_EMBEDDING_BIND_ADDR:-0.0.0.0}:8001:8001"
+    environment:
+      <<: *ai-env
+      AI_CAPABILITIES: ${AI_EMBEDDING_CAPABILITIES:-embedding,colbert,llm}
+      AI_START_WORKER: "false"
+      AI_MODEL_PRELOAD: ${AI_EMBEDDING_PRELOAD:-true}
+      EMBEDDING_GPU_ID: ${EMBEDDING_GPU_ID:-0}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-0}
+      OCR_USE_GPU: "false"
+
+  ai-rerank:
+    <<: *ai-common
+    profiles: ["rerank"]
+    container_name: kb-ai-rerank
+    ports:
+      - "${AI_RERANK_BIND_ADDR:-0.0.0.0}:8001:8001"
+    environment:
+      <<: *ai-env
+      AI_CAPABILITIES: ${AI_RERANK_CAPABILITIES:-rerank}
+      AI_START_WORKER: "false"
+      AI_MODEL_PRELOAD: ${AI_RERANK_PRELOAD:-true}
+      RERANKER_GPU_ID: ${RERANKER_GPU_ID:-0}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-0}
+      OCR_USE_GPU: "false"
+
+  ai-llm-proxy:
+    <<: *ai-common
+    profiles: ["llm-proxy"]
+    container_name: kb-ai-llm-proxy
+    ports:
+      - "${AI_LLM_BIND_ADDR:-0.0.0.0}:8001:8001"
+    environment:
+      <<: *ai-env
+      AI_CAPABILITIES: ${AI_LLM_CAPABILITIES:-llm}
+      AI_START_WORKER: "false"
+      AI_MODEL_PRELOAD: "false"
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-void}
+      OCR_USE_GPU: "false"
+    deploy: {}
+
+  ai-worker:
+    <<: *ai-common
+    profiles: ["worker"]
+    container_name: kb-ai-worker
+    ports:
+      - "${AI_WORKER_BIND_ADDR:-0.0.0.0}:8001:8001"
+    environment:
+      <<: *ai-env
+      AI_CAPABILITIES: ${AI_WORKER_CAPABILITIES:-worker,ocr,embedding}
+      AI_START_WORKER: "true"
+      AI_MODEL_PRELOAD: ${AI_WORKER_PRELOAD:-false}
+      EMBEDDING_GPU_ID: ${WORKER_EMBEDDING_GPU_ID:-0}
+      OCR_USE_GPU: ${OCR_USE_GPU:-true}
+      OCR_GPU_ID: ${OCR_GPU_ID:-0}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-0}
+
+  ollama:
+    profiles: ["llm"]
+    image: ollama/ollama:latest
+    container_name: ollama_llm
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NUM_GPU: ${OLLAMA_NUM_GPU:-1}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      OLLAMA_GPU_OVERHEAD: ${OLLAMA_GPU_OVERHEAD:-512}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-0}
+    ports:
+      - "${OLLAMA_BIND_ADDR:-0.0.0.0}:11434:11434"
+    volumes:
+      - ollamadata:/root/.ollama
+    restart: always
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  ollamadata:
+    driver: local

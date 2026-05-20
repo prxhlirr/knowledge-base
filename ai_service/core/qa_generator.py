@@ -53,7 +53,7 @@ class QAGenerator:
         "开办这个调解机构需要准备多少资金？\n"
     )
 
-    def generate(self, content: str, timeout: float = 45.0) -> List[str]:
+    def generate(self, content: str, timeout: float | None = None) -> List[str]:
         """
         为单个 fine chunk 生成口语化问题列表（同步，线程安全）。
 
@@ -73,6 +73,8 @@ class QAGenerator:
         content = (content or "").strip()
         if len(content) < 8:
             return []
+        if timeout is None:
+            timeout = float(os.getenv("QA_GENERATION_TIMEOUT_SECONDS", "45"))
 
         prompt = (
             f"{self._FEW_SHOT}\n"
@@ -105,7 +107,7 @@ class QAGenerator:
         self,
         chunks: List[str],
         max_workers: int | None = None,
-        timeout: float = 45.0,
+        timeout: float | None = None,
     ) -> Dict[int, List[str]]:
         """
         Fan-out/Fan-in：并发批量为多个 chunks 生成问题。
@@ -125,6 +127,8 @@ class QAGenerator:
         """
         if max_workers is None:
             max_workers = int(os.getenv("QA_LLM_CONCURRENCY", "3"))
+        if timeout is None:
+            timeout = float(os.getenv("QA_GENERATION_TIMEOUT_SECONDS", "45"))
 
         results: Dict[int, List[str]] = {}
 

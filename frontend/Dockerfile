@@ -21,4 +21,4 @@ EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD wget -qO- http://localhost/index.html || exit 1
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["/bin/sh", "-c", "printf 'window.__APP_CONFIG__ = { API_BASE_URL: \"%s\" };\\n' \"${API_BASE_URL:-/api/v1}\" > /usr/share/nginx/html/env-config.js && nginx -g 'daemon off;'"]

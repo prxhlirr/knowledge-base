@@ -42,10 +42,10 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens
         }
-        # 只在显式开启时传 enable_thinking。部分 OpenAI 兼容服务会对未知参数
-        # 直接返回 400，而不是忽略它。
-        if os.getenv("LLM_SEND_ENABLE_THINKING", "false").lower() == "true":
-            payload["enable_thinking"] = enable_thinking
+        # [第一性原理加固] 仅在显式启用思维链（enable_thinking 为 True）且配置开关开启时才注入此键值。
+        # 避免在关闭思维链（enable_thinking 为 False）时强塞 "enable_thinking": false 导致严格网关抛出 400 错误。
+        if enable_thinking and os.getenv("LLM_SEND_ENABLE_THINKING", "false").lower() == "true":
+            payload["enable_thinking"] = True
         
         # 2. 网络交互
         try:
@@ -97,7 +97,12 @@ class LLMClient:
         last_error = None
         for attempt in range(3):
             try:
-                return requests.post(llm_url, json=payload, headers=headers, timeout=timeout)
+                return requests.post(
+                    llm_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=LLMClient._timeout_tuple(timeout)
+                )
             except transient as exc:
                 last_error = exc
                 if attempt >= 2:
@@ -106,3 +111,9 @@ class LLMClient:
                 print(f"鈿狅笍 [LLMClient Retry] attempt={attempt + 1} delay={delay:.1f}s error={exc}")
                 time.sleep(delay)
         raise last_error
+
+    @staticmethod
+    def _timeout_tuple(timeout: float):
+        connect_timeout = float(os.getenv("LLM_CONNECT_TIMEOUT", "10"))
+        read_timeout = float(os.getenv("LLM_READ_TIMEOUT", str(timeout)))
+        return (connect_timeout, max(float(timeout), read_timeout))

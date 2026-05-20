@@ -124,6 +124,7 @@
 <script setup>
 import { ref } from 'vue'
 import { useEditorSimilarity } from '../composables/useEditorSimilarity'
+import { API_BASE } from '../utils/apiBase'
 
 const title = ref('')
 const body = ref('')
@@ -172,7 +173,7 @@ async function handleViewSource(doc) {
     if (doc.docId) params.append('docId', doc.docId)
     if (doc.source) params.append('sourceName', doc.source)
     
-    const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/file/preview?${params.toString()}`)
+    const res = await fetch(`${API_BASE}/file/preview?${params.toString()}`)
     const data = await res.json()
     
     if (data.code === 200 && data.data && data.data.url) {

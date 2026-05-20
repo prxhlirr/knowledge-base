@@ -1,0 +1,227 @@
+# Offline A/B deployment template.
+#
+# Server A:
+#   docker compose -f docker-compose-offline-ab-optimized.yml --profile llm up -d
+#
+# Server B:
+#   docker compose -f docker-compose-offline-ab-optimized.yml --profile ai up -d
+#
+# Java/frontend server, if deployed by this compose:
+#   docker compose -f docker-compose-offline-ab-optimized.yml --profile app up -d
+#
+# Required .env examples:
+#   SERVER_A_IP=10.0.0.10
+#   SERVER_B_IP=10.0.0.11
+#   JAVA_SERVER_IP=10.0.0.12
+#   OLLAMA_MODEL=qwen3.5:4b
+#   MODEL_HOST_DIR=/opt/knowledge-base/models
+#   KB_INTERNAL_TOKEN=change-me
+
+x-ai-env: &ai-env
+  MODEL_BASE_PATH: /app/models/onnx_native
+  REDIS_HOST: ${REDIS_HOST:-${JAVA_SERVER_IP:-10.0.0.12}}
+  REDIS_PORT: ${REDIS_PORT:-6379}
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+  ES_HOST: ${ES_HOST:-http://${JAVA_SERVER_IP:-10.0.0.12}:9200}
+  ES_USER: ${ES_USER:-admin}
+  ES_PASS: ${ES_PASS:-}
+  JAVA_SERVICE_HOST: ${JAVA_SERVICE_HOST:-http://${JAVA_SERVER_IP:-10.0.0.12}:8080}
+  JAVA_API_BASE: ${JAVA_API_BASE:-http://${JAVA_SERVER_IP:-10.0.0.12}:8080/api/v1}
+  KB_INTERNAL_TOKEN: ${KB_INTERNAL_TOKEN:-kb-dev-token-change-me}
+  LLM_API_URL: ${LLM_API_URL:-http://${SERVER_A_IP:-10.0.0.10}:11434/v1/chat/completions}
+  LLM_MODEL: ${LLM_MODEL:-${OLLAMA_MODEL:-qwen3.5:4b}}
+  QA_LLM_MODEL: ${QA_LLM_MODEL:-${OLLAMA_MODEL:-qwen3.5:4b}}
+  HYDE_LLM_MODEL: ${HYDE_LLM_MODEL:-${OLLAMA_MODEL:-qwen3.5:4b}}
+  RERANKER_LLM_MODEL: ${RERANKER_LLM_MODEL:-${OLLAMA_MODEL:-qwen3.5:4b}}
+  LLM_CONNECT_TIMEOUT: ${LLM_CONNECT_TIMEOUT:-10}
+  LLM_READ_TIMEOUT: ${LLM_READ_TIMEOUT:-300}
+  LLM_STREAM_READ_TIMEOUT: ${LLM_STREAM_READ_TIMEOUT:-300}
+  LLM_SEND_ENABLE_THINKING: ${LLM_SEND_ENABLE_THINKING:-false}
+  LLM_SEND_THINK_FALSE: ${LLM_SEND_THINK_FALSE:-true}
+  QA_LLM_MAX_TOKENS: ${QA_LLM_MAX_TOKENS:-256}
+  QA_GENERATION_TIMEOUT_SECONDS: ${QA_GENERATION_TIMEOUT_SECONDS:-45}
+  AI_MODEL_PRELOAD: ${AI_MODEL_PRELOAD:-true}
+  AI_MODEL_IDLE_UNLOAD: ${AI_MODEL_IDLE_UNLOAD:-true}
+  AI_MODEL_IDLE_TTL_SECONDS: ${AI_MODEL_IDLE_TTL_SECONDS:-1800}
+  AI_MODEL_IDLE_CHECK_INTERVAL_SECONDS: ${AI_MODEL_IDLE_CHECK_INTERVAL_SECONDS:-60}
+  PADDLE_OCR_MODEL_DIR: /app/models/paddle_ocr
+  PADDLE_OCR_OFFLINE_STRICT: "true"
+  OCR_USE_GPU: "false"
+  GOTENBERG_URL: http://gotenberg:3000
+  NO_PROXY: ${NO_PROXY:-${SERVER_A_IP:-10.0.0.10},${SERVER_B_IP:-10.0.0.11},${JAVA_SERVER_IP:-10.0.0.12},localhost,127.0.0.1}
+  no_proxy: ${no_proxy:-${SERVER_A_IP:-10.0.0.10},${SERVER_B_IP:-10.0.0.11},${JAVA_SERVER_IP:-10.0.0.12},localhost,127.0.0.1}
+  PYTHONIOENCODING: utf-8
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+
+x-ai-common: &ai-common
+  image: knowledge-base-ai:1.0.0
+  restart: always
+  runtime: nvidia
+  volumes:
+    - ${MODEL_HOST_DIR:-./models}:/app/models:ro
+    - ${AI_CONFIG_HOST_DIR:-./ai_service/config}:/app/config:ro
+  command: >
+    bash -c "python -m uvicorn main:app --host 0.0.0.0 --port 8001 --workers 1"
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/ai/health', timeout=5)"]
+    interval: 30s
+    timeout: 10s
+    start_period: 120s
+    retries: 3
+
+services:
+  # Server A: LLM only. Keep qwen3.5:4b resident and do not mix online
+  # retrieval with QA batch generation on the same GPU unless you have to.
+  ollama:
+    profiles: ["llm"]
+    image: ollama/ollama:latest
+    container_name: kb-ollama-llm
+    restart: always
+    runtime: nvidia
+    ports:
+      - "${OLLAMA_BIND_ADDR:-0.0.0.0}:11434:11434"
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      OLLAMA_NUM_GPU: ${OLLAMA_NUM_GPU:-1}
+      OLLAMA_GPU_OVERHEAD: ${OLLAMA_GPU_OVERHEAD:-512}
+      NVIDIA_VISIBLE_DEVICES: ${OLLAMA_GPU:-0}
+    volumes:
+      - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${OLLAMA_GPU:-0}"]
+              capabilities: [gpu]
+
+  # Server B GPU0: online embedding, colbert, and LLM proxy.
+  # Java should point AI_EMBEDDING_HOST, AI_COLBERT_HOST, and AI_LLM_HOST here.
+  ai-embedding:
+    <<: *ai-common
+    profiles: ["ai", "embedding"]
+    container_name: kb-ai-embedding
+    ports:
+      - "${AI_EMBEDDING_BIND_ADDR:-0.0.0.0}:8001:8001"
+    environment:
+      <<: *ai-env
+      AI_CAPABILITIES: embedding,colbert,llm
+      AI_START_WORKER: "false"
+      EMBEDDING_GPU_ID: "0"
+      ORT_GPU_MEM_LIMIT_GB: ${AI_EMBEDDING_ORT_GPU_MEM_LIMIT_GB:-3}
+      NVIDIA_VISIBLE_DEVICES: ${AI_EMBEDDING_GPU:-0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${AI_EMBEDDING_GPU:-0}"]
+              capabilities: [gpu]
+
+  # Server B GPU1: online rerank only.
+  # With NVIDIA_VISIBLE_DEVICES=1, the single visible card is cuda:0 inside
+  # the container, so RERANKER_GPU_ID must stay 0.
+  ai-rerank:
+    <<: *ai-common
+    profiles: ["ai", "rerank"]
+    container_name: kb-ai-rerank
+    ports:
+      - "${AI_RERANK_BIND_ADDR:-0.0.0.0}:8002:8001"
+    environment:
+      <<: *ai-env
+      AI_CAPABILITIES: rerank
+      AI_START_WORKER: "false"
+      RERANKER_GPU_ID: "0"
+      ORT_GPU_MEM_LIMIT_GB: ${AI_RERANK_ORT_GPU_MEM_LIMIT_GB:-3}
+      NVIDIA_VISIBLE_DEVICES: ${AI_RERANK_GPU:-1}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${AI_RERANK_GPU:-1}"]
+              capabilities: [gpu]
+
+  # Server B or a later extra GPU server: low-priority ingestion and QA worker.
+  # This service is intentionally separated from online retrieval. Start it
+  # only when you need background document processing / QA generation.
+  ai-worker-qa:
+    <<: *ai-common
+    profiles: ["worker"]
+    container_name: kb-ai-worker-qa
+    ports:
+      - "${AI_WORKER_BIND_ADDR:-0.0.0.0}:8003:8001"
+    environment:
+      <<: *ai-env
+      AI_CAPABILITIES: worker,embedding,ocr
+      AI_START_WORKER: "true"
+      AI_MODEL_PRELOAD: ${AI_WORKER_PRELOAD:-false}
+      QA_LLM_CONCURRENCY: ${QA_LLM_CONCURRENCY:-1}
+      QA_GENERATION_TIMEOUT_SECONDS: ${QA_WORKER_GENERATION_TIMEOUT_SECONDS:-120}
+      QA_LLM_MAX_TOKENS: ${QA_WORKER_LLM_MAX_TOKENS:-128}
+      EMBEDDING_GPU_ID: "0"
+      ORT_GPU_MEM_LIMIT_GB: ${AI_WORKER_ORT_GPU_MEM_LIMIT_GB:-3}
+      OCR_USE_GPU: ${OCR_USE_GPU:-false}
+      OCR_GPU_ID: "0"
+      NVIDIA_VISIBLE_DEVICES: ${AI_WORKER_GPU:-0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${AI_WORKER_GPU:-0}"]
+              capabilities: [gpu]
+
+  gotenberg:
+    profiles: ["ai", "worker"]
+    image: gotenberg/gotenberg:8
+    container_name: kb-gotenberg
+    restart: always
+    ports:
+      - "${GOTENBERG_BIND_ADDR:-0.0.0.0}:3000:3000"
+    command:
+      - gotenberg
+      - --api-port=3000
+
+  # Optional app profile. If Java/frontend are deployed elsewhere, do not start
+  # this profile; only copy the environment values into that deployment.
+  knowledge-base-java:
+    profiles: ["app"]
+    image: knowledge-base-java:1.0.0
+    container_name: kb-java
+    restart: always
+    ports:
+      - "${JAVA_BIND_ADDR:-0.0.0.0}:8080:8080"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./java_service/config:/app/config:ro
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
+      SPRING_REDIS_HOST: ${REDIS_HOST:-${JAVA_SERVER_IP:-10.0.0.12}}
+      SPRING_REDIS_PORT: ${REDIS_PORT:-6379}
+      SPRING_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      AI_SERVICE_HOST: ${AI_SERVICE_HOST:-http://${SERVER_B_IP:-10.0.0.11}:8001}
+      AI_EMBEDDING_HOST: ${AI_EMBEDDING_HOST:-http://${SERVER_B_IP:-10.0.0.11}:8001}
+      AI_COLBERT_HOST: ${AI_COLBERT_HOST:-http://${SERVER_B_IP:-10.0.0.11}:8001}
+      AI_RERANK_HOST: ${AI_RERANK_HOST:-http://${SERVER_B_IP:-10.0.0.11}:8002}
+      AI_LLM_HOST: ${AI_LLM_HOST:-http://${SERVER_B_IP:-10.0.0.11}:8001}
+      QA_LLM_CONNECT_TIMEOUT_MS: ${QA_LLM_CONNECT_TIMEOUT_MS:-10000}
+      QA_LLM_READ_TIMEOUT_MS: ${QA_LLM_READ_TIMEOUT_MS:-300000}
+      QA_LLM_MAX_TOKENS: ${JAVA_QA_LLM_MAX_TOKENS:-256}
+      KB_INTERNAL_TOKEN: ${KB_INTERNAL_TOKEN:-kb-dev-token-change-me}
+
+  knowledge-base-frontend:
+    profiles: ["app"]
+    image: knowledge-base-frontend:1.0.0
+    container_name: kb-frontend
+    restart: always
+    ports:
+      - "${FRONTEND_BIND_ADDR:-0.0.0.0}:80:80"
+
+volumes:
+  ollama-data:
+    driver: local

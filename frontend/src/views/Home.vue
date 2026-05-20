@@ -264,6 +264,7 @@
 <script setup>
 import { computed, onBeforeUnmount, ref } from 'vue'
 import AiAnswerCard from '../components/search/AiAnswerCard.vue'
+import { API_BASE } from '../utils/apiBase'
 import { useHomeSearch } from '../composables/useHomeSearch'
 
 const query = ref('')
@@ -322,7 +323,7 @@ const openTagModal = async (item) => {
   // 尝试向后端拉取最新的打标“草稿”（如果用户刚修改过但还没同步到 ES）
   if (item.doc_id) {
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/tags/detail?docId=${item.doc_id}`);
+      const res = await fetch(`${API_BASE}/tags/detail?docId=${item.doc_id}`);
       const data = await res.json();
       if (data.code === 200 && data.data) {
         tagForm.value.tags = data.data.tags || '';
@@ -347,7 +348,7 @@ const submitTag = async () => {
   }
   submittingTag.value = true;
   try {
-    const response = await fetch(`${import.meta.env.VITE_API_BASE_URL}/tags/save`, {
+    const response = await fetch(`${API_BASE}/tags/save`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -385,7 +386,7 @@ const openSourceFile = async (fileName, docId) => {
 
   try {
     const res = await fetch(
-      `${import.meta.env.VITE_API_BASE_URL}/doc/${encodedDocId}/chunks` +
+      `${API_BASE}/doc/${encodedDocId}/chunks` +
       `?appCode=${import.meta.env.VITE_APP_CODE || ''}` +
       `&fileName=${encodeURIComponent(fileName || '')}`
     )
@@ -621,7 +622,7 @@ const openChunkDrawer = async (item) => {
   try {
     // 调用/doc/{docId}/chunks 查询对应文档的全部分片
     const res = await fetch(
-      `${import.meta.env.VITE_API_BASE_URL}/doc/${item.doc_id}/chunks` +
+      `${API_BASE}/doc/${item.doc_id}/chunks` +
       `?appCode=${import.meta.env.VITE_APP_CODE || ''}` +
       `&fileName=${encodeURIComponent(item.file_name || '')}`
     );
@@ -679,7 +680,7 @@ const executeProbe = async (chunk) => {
   probing.value = true;
   probeResult.value = null;
   try {
-    const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/search/similarity/probe`, {
+    const res = await fetch(`${API_BASE}/search/similarity/probe`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

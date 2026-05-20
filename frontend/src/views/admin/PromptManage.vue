@@ -166,8 +166,9 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue';
 import axios from 'axios';
+import { API_BASE } from '../../utils/apiBase';
 
-const BASE = `${import.meta.env.VITE_API_BASE_URL}/admin/prompts`;
+const BASE = `${API_BASE}/admin/prompts`;
 
 // ── 场景中文说明 ───────────────────────────────────────────────
 const SCENE_DESC = {

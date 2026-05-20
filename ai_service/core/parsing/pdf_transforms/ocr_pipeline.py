@@ -753,7 +753,6 @@ class OcrPipelineTransform:
                 # ── 方案 B：斩断长文档扫描的 OOM 链条，强制清理显存和物理内存 ──
                 if 'pix' in locals(): del pix
                 if 'img' in locals(): del img
-                import gc
                 gc.collect()
 
             reported_pages = {int(item.page_idx) for item in page_statuses}

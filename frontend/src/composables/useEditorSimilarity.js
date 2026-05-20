@@ -1,4 +1,5 @@
 import { computed, reactive, ref } from 'vue'
+import { API_BASE } from '../utils/apiBase'
 
 function authHeaders(appCode) {
   return {
@@ -79,9 +80,8 @@ export function useEditorSimilarity(options = {}) {
     state.error = ''
 
     try {
-      const apiBase = import.meta.env.VITE_API_BASE_URL || '/api/v1'
       const appCode = import.meta.env.VITE_APP_CODE || 'ADMIN_MASTER_KEY'
-      const resp = await fetch(`${apiBase}/editor/similar-docs`, {
+      const resp = await fetch(`${API_BASE}/editor/similar-docs`, {
         method: 'POST',
         headers: authHeaders(appCode),
         signal: controller.signal,

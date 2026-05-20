@@ -218,6 +218,7 @@
 <script setup>
 import { ref, onMounted } from 'vue';
 import axios from 'axios';
+import { API_BASE } from '../../utils/apiBase';
 
 const config = ref({});
 const loading = ref(true);
@@ -235,7 +236,7 @@ const removeRule = (index) => {
 const fetchConfig = async () => {
   loading.value = true;
   try {
-    const res = await axios.get(`${import.meta.env.VITE_API_BASE_URL}/admin/tuning/config`);
+    const res = await axios.get(`${API_BASE}/admin/tuning/config`);
     if (res.data.code === 200) {
       config.value = res.data.data;
       if (typeof config.value.metaExtractRules === 'string') {
@@ -258,7 +259,7 @@ const saveConfig = async () => {
     if (Array.isArray(payload.metaExtractRules)) {
        payload.metaExtractRules = JSON.stringify(payload.metaExtractRules);
     }
-    const res = await axios.post(`${import.meta.env.VITE_API_BASE_URL}/admin/tuning/config`, payload);
+    const res = await axios.post(`${API_BASE}/admin/tuning/config`, payload);
     if (res.data.code === 200) {
       alert('所有调优参数已持久化并同步至 AI 节点感知！');
       await fetchConfig();

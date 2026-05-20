@@ -937,6 +937,7 @@ public class SearchController {
 
         long firstTokenMs = -1L;
         int tokenEvents = 0;
+        boolean streamedAnyToken = false;
         StringBuilder answerBuffer = new StringBuilder();
         try (com.boyang.search.gateway.AiEngineGateway.LlmStreamResponse response = streamResponse) {
             java.io.BufferedReader reader = response.getReader();
@@ -956,6 +957,7 @@ public class SearchController {
                             if (firstTokenMs < 0) {
                                 firstTokenMs = System.currentTimeMillis() - streamStartMs;
                             }
+                            sendQaEvent(emitter, "token", objectMapper.writeValueAsString(retryAnswer));
                             answerSource = "non_stream_retry";
                             answerPlan.getEvidenceSummary().put("llm_stream_empty_retry", true);
                         }
@@ -968,6 +970,7 @@ public class SearchController {
                             if (firstTokenMs < 0) {
                                 firstTokenMs = System.currentTimeMillis() - streamStartMs;
                             }
+                            sendQaEvent(emitter, "token", objectMapper.writeValueAsString(fallbackAnswer));
                             answerSource = "extractive_fallback";
                             answerPlan.getEvidenceSummary().put("llm_empty_answer_fallback", true);
                         }
@@ -985,10 +988,10 @@ public class SearchController {
                     String plainAnswer = plainTextFromAnswerParts(answerParts);
                     answerBuffer.setLength(0);
                     answerBuffer.append(plainAnswer);
-                    if (!plainAnswer.isEmpty()) {
+                    if (!plainAnswer.isEmpty() && !streamedAnyToken && "stream".equals(answerSource)) {
                         sendQaEvent(emitter, "token", objectMapper.writeValueAsString(plainAnswer));
-                        sendQaEvent(emitter, "answer_parts", objectMapper.writeValueAsString(answerParts));
                     }
+                    sendQaEvent(emitter, "answer_parts", objectMapper.writeValueAsString(answerParts));
                     Map<String, Object> llmMetrics = buildLlmMetrics(
                             modelKey, llmConnectMs, firstTokenMs, tokenEvents,
                             streamStartMs, requestBytes, answerBuffer.length());
@@ -1014,6 +1017,8 @@ public class SearchController {
                 }
                 tokenEvents++;
                 appendToken(answerBuffer, data);
+                streamedAnyToken = true;
+                sendQaEvent(emitter, "token", data);
             }
         }
         System.out.printf("[QA Stream] model_key=%s connect=%dms first_token=%dms tokens=%d total=%dms%n",

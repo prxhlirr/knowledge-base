@@ -10,7 +10,7 @@ import java.util.List;
 @Component
 @ConfigurationProperties(prefix = "qa.answer")
 public class QaAnswerProperties {
-    private int promptMaxChars = 12000;
+    private int promptMaxChars = 6000;
     private int targetPromptChars = 5000;
     private int evidenceMaxChars = 900;
     private int neighborEvidenceMaxChars = 420;
@@ -27,7 +27,7 @@ public class QaAnswerProperties {
     private double materialConfidenceDivisor = 6.0;
     private String modelKey = "QA_LLM_MODEL";
     private double temperature = 0.2;
-    private int maxTokens = 1500;
+    private int maxTokens = 600;
     private boolean claimPlanEnabled = true;
     private String structuredMode = "auto";
     private List<String> structuredRiskIntents = new ArrayList<>(Arrays.asList(
@@ -46,9 +46,9 @@ public class QaAnswerProperties {
     private int qaRecallWaitBudgetMs = 400;
     private int qaRecallTimeoutMs = 2000;
     private boolean qaRecallRequired = false;
-    private int connectTimeoutMs = 10000;
-    private int readTimeoutMs = 120000;
-    private long streamTimeoutMs = 120000L;
+    private int connectTimeoutMs = 5000;
+    private int readTimeoutMs = 60000;
+    private long streamTimeoutMs = 70000L;
     private Prompt prompt = new Prompt();
     private StructuredPrompt structuredPrompt = new StructuredPrompt();
     private RiskPolicy riskPolicy = new RiskPolicy();

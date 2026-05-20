@@ -184,6 +184,7 @@
 
 <script setup>
 import { ref, nextTick } from 'vue'
+import { API_BASE } from '../utils/apiBase'
 
 const inputText = ref('')
 const messages = ref([])
@@ -213,11 +214,10 @@ async function openDrawer(cite) {
 
   drawerLoading.value = true
   try {
-    const apiBase = import.meta.env.VITE_API_BASE_URL || ''
     const appCode = import.meta.env.VITE_APP_CODE || 'ADMIN_MASTER_KEY'
     const docId = encodeURIComponent(cite.doc_id || 'by-file-name')
     const fileName = encodeURIComponent(cite.file_name || '')
-    const resp = await fetch(`${apiBase}/doc/${docId}/chunks?appCode=${encodeURIComponent(appCode)}&fileName=${fileName}`)
+    const resp = await fetch(`${API_BASE}/doc/${docId}/chunks?appCode=${encodeURIComponent(appCode)}&fileName=${fileName}`)
     const data = await resp.json()
 
     if (data.code === 200 && data.data) {
@@ -541,11 +541,10 @@ async function sendQuestion() {
   isStreaming.value = true
 
   try {
-    const apiBase = import.meta.env.VITE_API_BASE_URL || ''
     const appCode = import.meta.env.VITE_APP_CODE || 'ADMIN_MASTER_KEY'
 
     // 使用 fetch 读取 SSE 流（EventSource 不支持 POST）
-    const resp = await fetch(`${apiBase}/search/qa`, {
+    const resp = await fetch(`${API_BASE}/search/qa`, {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',

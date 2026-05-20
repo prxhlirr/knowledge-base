@@ -48,7 +48,11 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       
       # 跨服务通讯（向 AI 发出信令）
-      - AI_SERVICE_HOST=http://ai-service:8001
+      - AI_SERVICE_HOST=${AI_SERVICE_HOST:-http://ai-service:8001}
+      - AI_EMBEDDING_HOST=${AI_EMBEDDING_HOST:-${AI_SERVICE_HOST:-http://ai-service:8001}}
+      - AI_COLBERT_HOST=${AI_COLBERT_HOST:-${AI_EMBEDDING_HOST:-${AI_SERVICE_HOST:-http://ai-service:8001}}}
+      - AI_RERANK_HOST=${AI_RERANK_HOST:-${AI_SERVICE_HOST:-http://ai-service:8001}}
+      - AI_LLM_HOST=${AI_LLM_HOST:-${AI_SERVICE_HOST:-http://ai-service:8001}}
       - KB_INTERNAL_TOKEN=kb-dev-token-change-me-in-prod
       
       # JWT 认证模式（离线部署说明）
