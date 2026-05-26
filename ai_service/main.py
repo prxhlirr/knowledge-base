@@ -1,6 +1,7 @@
 import time
 import os
 import re
+import math
 
 # 优先加载 .env 文件中的环境变量（离线部署配置入口）
 # 开发环境无 .env 时自动跳过，不影响已通过 os.environ 设置的变量
@@ -38,6 +39,13 @@ from task_worker import main as run_worker
 
 def _env_bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+
+def _sigmoid_score(value: float) -> float:
+    if value >= 0:
+        z = math.exp(-value)
+        return 1.0 / (1.0 + z)
+    z = math.exp(value)
+    return z / (1.0 + z)
 
 def _configured_capabilities() -> set:
     raw = os.getenv("AI_CAPABILITIES", os.getenv("AI_SERVICE_ROLE", "all"))
@@ -769,13 +777,17 @@ def rerank_document_similarity(req: DocumentSimilarityRerankRequest):
 
     start_time = time.time()
     try:
-        scores = model_manager.rerank(req.query, req.documents)
+        raw_scores = model_manager.rerank(req.query, req.documents)
+        scores = [_sigmoid_score(float(score)) for score in raw_scores]
         cost_ms = int((time.time() - start_time) * 1000)
         return {
             "code": 200,
             "msg": "success",
             "data": {
                 "scores": scores,
+                "rawScores": raw_scores,
+                "scoreType": "sigmoid_probability",
+                "rawScoreType": "bge_reranker_relevance_logit",
                 "costMs": cost_ms,
                 "mode": "cross_encoder"
             }

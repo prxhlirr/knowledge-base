@@ -8,14 +8,55 @@ from elasticsearch import Elasticsearch
 
 # ── ES 索引名称常量（全系统统一入口，避免魔法字符串）──────────────────────────
 # [架构重构] 从 rag_pipeline.py 提取，作为单一数据源，所有模块统一从此导入
-INDEX_NAME     = "kb_document_v1"
+INDEX_NAME     = os.getenv("KB_DOCUMENT_INDEX", "kb_document_v1")
 QA_INDEX_NAME  = "kb_qa_pairs"       # QA 物理索引名（仅 init 创建时使用）
-DOC_META_INDEX = "kb_doc_meta"
+DOC_META_INDEX = os.getenv("KB_DOC_META_INDEX", "kb_doc_meta_v2")
+DOC_META_READ_ALIAS = os.getenv("KB_DOC_META_READ_ALIAS", "kb_doc_meta_read")
+DOC_META_WRITE_ALIAS = os.getenv("KB_DOC_META_WRITE_ALIAS", "kb_doc_meta_write")
 
 # ── QA 索引读写别名（[轨道A] 别名化改造，业务代码统一使用别名不直接引用物理索引）─
 # 设计：写别名 is_write_index=True 保证 bulk 精确路由；读别名无限制支持 Reindex 期间多索引并读
 QA_INDEX_WRITE_ALIAS = "kb_qa_write"  # 所有写入（bulk index）走此别名
 QA_INDEX_READ_ALIAS  = "kb_qa_read"   # 所有读查询（KNN、match）走此别名
+
+
+def doc_meta_index_mapping() -> dict:
+    return {
+        "settings": {
+            "number_of_shards": 1,
+            "number_of_replicas": 0,
+        },
+        "mappings": {
+            "properties": {
+                "doc_id": {"type": "keyword"},
+                "doc_version": {"type": "integer"},
+                "content_hash": {"type": "keyword"},
+                "source": {"type": "keyword"},
+                "source_name": {"type": "keyword"},
+                "title": {
+                    "type": "text",
+                    "fields": {
+                        "keyword": {"type": "keyword", "ignore_above": 256}
+                    },
+                },
+                "summary": {"type": "text", "index": False},
+                "doc_type": {"type": "keyword"},
+                "data_source": {"type": "keyword"},
+                "chunk_count": {"type": "integer"},
+                "is_latest": {"type": "boolean"},
+                "acl_tokens": {"type": "keyword"},
+                "visibility": {"type": "keyword"},
+                "owner_dept_id": {"type": "keyword"},
+                "updated_at": {"type": "date", "format": "epoch_millis"},
+                "doc_vector": {
+                    "type": "dense_vector",
+                    "dims": 1024,
+                    "index": True,
+                    "similarity": "cosine",
+                },
+            }
+        },
+    }
 
 
 class ESSetup:
@@ -188,22 +229,9 @@ class ESSetup:
 
         # 确保 kb_doc_meta 元数据索引也存在
         if not self.es.indices.exists(index=DOC_META_INDEX):
-            self.es.indices.create(index=DOC_META_INDEX, body={
-                "mappings": {
-                    "properties": {
-                        "source_name":  {"type": "keyword"},
-                        "content_hash": {"type": "keyword"},
-                        "doc_version":  {"type": "integer"},
-                        "is_latest":    {"type": "boolean"},
-                        "updated_by":   {"type": "keyword"},
-                        "version_at":   {"type": "date", "format": "epoch_millis"},
-                        "chunk_count":  {"type": "integer"},
-                        "visibility":   {"type": "keyword"},
-                        "acl_tokens":   {"type": "keyword"}
-                    }
-                }
-            })
-            print(f"✅ 元数据索引 {DOC_META_INDEX} 创建成功！")
+            self.es.indices.create(index=DOC_META_INDEX, body=doc_meta_index_mapping())
+            print(f"[DocMeta] index {DOC_META_INDEX} created with dense doc_vector mapping")
+        self._ensure_doc_meta_aliases()
 
         # [Fix] 动态拉取路由表，为 Java 业务端新增的分类分区创建 ES 索引
         java_host = os.getenv("JAVA_SERVICE_HOST", "http://localhost:8080")
@@ -306,6 +334,46 @@ class ESSetup:
             print(f"✅ [Mapping] Phase 1 新增字段（版本/部门/权限）已热更新到索引 {INDEX_NAME}")
         except Exception as e:
             print(f"⚠️ [Mapping] 更新 mapping 失败（可能索引尚未创建或冲突）: {e}")
+
+    def _ensure_doc_meta_aliases(self):
+        actions = []
+        try:
+            current = self.es.indices.get_alias(index=DOC_META_INDEX).get(DOC_META_INDEX, {}).get("aliases", {})
+        except Exception:
+            current = {}
+
+        for alias in (DOC_META_READ_ALIAS, DOC_META_WRITE_ALIAS):
+            try:
+                alias_refs = self.es.indices.get_alias(name=alias)
+            except Exception:
+                alias_refs = {}
+            for index_name in alias_refs.keys():
+                if index_name != DOC_META_INDEX:
+                    actions.append({"remove": {
+                        "index": index_name,
+                        "alias": alias,
+                    }})
+
+        if DOC_META_READ_ALIAS not in current:
+            actions.append({"add": {
+                "index": DOC_META_INDEX,
+                "alias": DOC_META_READ_ALIAS,
+            }})
+        if current.get(DOC_META_WRITE_ALIAS, {}).get("is_write_index") is not True:
+            if DOC_META_WRITE_ALIAS in current:
+                actions.append({"remove": {
+                    "index": DOC_META_INDEX,
+                    "alias": DOC_META_WRITE_ALIAS,
+                }})
+            actions.append({"add": {
+                "index": DOC_META_INDEX,
+                "alias": DOC_META_WRITE_ALIAS,
+                "is_write_index": True,
+            }})
+
+        if actions:
+            self.es.indices.update_aliases(body={"actions": actions})
+            print(f"[DocMeta] aliases registered for {DOC_META_INDEX}: {DOC_META_READ_ALIAS}, {DOC_META_WRITE_ALIAS}")
 
     def _ensure_qa_index(self):
         """
@@ -526,7 +594,7 @@ class ESSetup:
             partition_indices = []
 
         # 2. kb_doc_meta 追加写别名（独立于 kb_document_* 体系）
-        partition_indices_with_meta = partition_indices + [DOC_META_INDEX]
+        partition_indices_with_meta = partition_indices
 
         for phys_index in partition_indices_with_meta:
             # 写别名命名规则：{物理索引名}_write

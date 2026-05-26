@@ -57,7 +57,7 @@ public class RrfFusionStep implements SearchPipelineStep {
 
         List<Map<String, Object>> candidates = rrfMerge(
             textResp, knnResp, sparseResp, qaHits,
-            context.getTopK(), context.getTuningConfig(), context.isNavigationalBypass(),
+            context.getFusionTopK(), context.getTuningConfig(), context.isNavigationalBypass(),
             context.getBm25FlatnessRatio(), context.getBm25TextHits(), context.getQueryIntent(),
             context
         );
@@ -86,6 +86,7 @@ public class RrfFusionStep implements SearchPipelineStep {
         System.out.println("  - Merged Candidates Pool Size: " + candidates.size());
 
         context.setCandidateDocs(candidates);
+        context.setRrfCandidateCount(candidates.size());
     }
 
     /**
@@ -121,7 +122,7 @@ public class RrfFusionStep implements SearchPipelineStep {
         Map<String, Map<String, Object>> docRegistry = new HashMap<>();
 
         // RRF 平滑因子 k（来自 DB，默认 60）：防止 rank=1 时贡献分过大
-        int k = 60;
+        int k = config != null ? config.getRrfK() : 60;
 
         // ── 动态权重计算（方案J - 自适应信号强度）────────────────────────────────
         double bm25RawMax = (textResp != null && !textResp.hits().hits().isEmpty()
@@ -412,6 +413,7 @@ public class RrfFusionStep implements SearchPipelineStep {
                     doc.put("_rrf_score", entry.getValue());
                     return doc;
                 })
+                .limit(Math.max(topK, 1))
                 .collect(Collectors.toList());
     }
 

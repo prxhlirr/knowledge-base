@@ -835,8 +835,15 @@ class ModelManager:
         
         if logits.ndim == 1:
             scores = logits.tolist()
+        elif logits.shape[1] == 1:
+            scores = logits[:, 0].tolist()
+        elif logits.shape[1] == 2:
+            # Binary classifier export: column 0 is often "not relevant" and
+            # column 1 is "relevant". The relevance logit is the class margin,
+            # whose sigmoid equals the positive-class softmax probability.
+            scores = (logits[:, 1] - logits[:, 0]).tolist()
         else:
-            scores = logits[:, 0].tolist() if logits.shape[1] > 0 else logits.flatten().tolist()
+            scores = logits[:, 0].tolist()
 
         if len(self._rerank_cache) > 500: self._rerank_cache.clear()
         self._rerank_cache[cache_key] = scores

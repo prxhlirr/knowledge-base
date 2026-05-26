@@ -13,7 +13,8 @@ from core.model_manager import model_manager
 from core.cleaning.text_cleaner import TextCleaner               # [架构重构阶段一] 文本净化
 from core.cleaning.noise_classifier import NoiseClassifier
 from core.indexing.es_setup import (
-    ESSetup, INDEX_NAME, QA_INDEX_NAME, DOC_META_INDEX,
+    ESSetup, INDEX_NAME, QA_INDEX_NAME, DOC_META_INDEX, DOC_META_WRITE_ALIAS,
+    doc_meta_index_mapping,
     QA_INDEX_WRITE_ALIAS, QA_INDEX_READ_ALIAS,   # [轨道A] QA 别名化改造
 )  # [架构重构阶段一] ES初始化 + 常量
 from core.indexing.dedup_checker import ContentDedupChecker       # [架构重构阶段四] 内容指纹去重
@@ -174,20 +175,7 @@ class RAGPipeline:
             print(f"✅ 索引 {INDEX_NAME} 创建成功！")
         # 确保 kb_doc_meta 索引也存在
         if not self.es.indices.exists(index=DOC_META_INDEX):
-            self.es.indices.create(index=DOC_META_INDEX, body={
-                "mappings": {
-                    "properties": {
-                        "source_name":    {"type": "keyword"},
-                        "content_hash":   {"type": "keyword"},
-                        "doc_version":    {"type": "integer"},
-                        "is_latest":      {"type": "boolean"},
-                        "updated_by":     {"type": "keyword"},
-                        "version_at":     {"type": "date", "format": "epoch_millis"},
-                        "chunk_count":    {"type": "integer"},
-                        "visibility":     {"type": "keyword"}
-                    }
-                }
-            })
+            self.es.indices.create(index=DOC_META_INDEX, body=doc_meta_index_mapping())
             print(f"✅ 元数据索引 {DOC_META_INDEX} 创建成功！")
 
     def _update_mapping(self):
@@ -1509,7 +1497,15 @@ class RAGPipeline:
         # [架构重构阶段四] 元数据更新委托给 DocIndexer
         try:
             data_src = ext_metadata.get("data_source", "document") if ext_metadata else "document"
-            self.doc_indexer.update_doc_meta(source_name, actions, data_src, content_hash=content_hash, acl_tokens=acl_tokens)
+            self.doc_indexer.update_doc_meta(
+                source_name,
+                actions,
+                data_src,
+                content_hash=content_hash,
+                acl_tokens=acl_tokens,
+                doc_id=f"{file_base_hash}_v{new_version}",
+                doc_version=new_version,
+            )
         except Exception as meta_err:
             print(f"⚠️ [DocMeta] 更新 kb_doc_meta 失败（不影响主索引）: {meta_err}")
 
@@ -1766,7 +1762,7 @@ class RAGPipeline:
         if norm > 0:
             mean_vec = mean_vec / norm
 
-        META_INDEX = "kb_doc_meta"
+        META_INDEX = DOC_META_WRITE_ALIAS
         doc_id = urllib.parse.quote(source_name, safe="")
         body = {
             "source":       source_name,
@@ -1779,9 +1775,10 @@ class RAGPipeline:
             "content_hash": content_hash,
             # [2PC 重构] 只有主数据切片用 True/False 控制，META 属于直接覆盖，设为 True
             "is_latest":    True,
+            "acl_tokens":   os.getenv("KB_DOC_META_DEFAULT_ACL_TOKENS", "_INTERNAL").split(","),
         }
         self.es.index(index=META_INDEX, id=doc_id, body=body)
-        print(f"✅ [DocMeta] kb_doc_meta 已同步: '{source_name}' ({len(fine_vectors)} fine chunks → doc_vector)")
+        print(f"✅ [DocMeta] {META_INDEX} 已同步: '{source_name}' ({len(fine_vectors)} fine chunks → doc_vector)")
 
 
     def _generate_and_index_qa_pairs(self, fine_chunks, source_name: str, file_base_hash: str, acl_tokens: list, doc_version: int = 0):
@@ -1997,4 +1994,3 @@ if __name__ == "__main__":
             print(f"⚠️ 警告: 索引 {INDEX_NAME} 未创建，可能是因为没有任何文档被成功入库。")
     else:
         print(f"❌ 找不到 mock 目录: {mock_dir}")
-

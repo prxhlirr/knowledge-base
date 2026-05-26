@@ -40,7 +40,7 @@ public class KeywordResultAssembleStep implements SearchPipelineStep {
         }
 
         List<Map<String, Object>> results = new ArrayList<>();
-        int limit = Math.min(context.getTopK(), docs.size());
+        int limit = Math.min(context.getReturnTopK(), docs.size());
         for (int i = 0; i < limit; i++) {
             Map<String, Object> doc = docs.get(i);
             List<Map<String, Object>> chunks = (List<Map<String, Object>>) doc.get("chunks");

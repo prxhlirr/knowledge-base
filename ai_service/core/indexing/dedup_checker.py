@@ -2,7 +2,7 @@ import hashlib
 import os
 
 from elasticsearch import Elasticsearch
-from core.indexing.es_setup import DOC_META_INDEX
+from core.indexing.es_setup import DOC_META_READ_ALIAS
 
 
 # [T6-1] 主文档索引名（is_latest=true 的文档在此索引可查）
@@ -112,7 +112,7 @@ class ContentDedupChecker:
         # Step2：兜底查 kb_doc_meta（快速查，但可能包含未激活的临时记录）
         try:
             dup_resp = self.es.search(
-                index=DOC_META_INDEX,
+                index=DOC_META_READ_ALIAS,
                 body={
                     "query": {
                         "bool": {

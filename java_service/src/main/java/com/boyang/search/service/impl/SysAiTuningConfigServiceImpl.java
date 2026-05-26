@@ -46,6 +46,10 @@ public class SysAiTuningConfigServiceImpl extends ServiceImpl<SysAiTuningConfigM
             jdbcTemplate.execute("ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS sliding_window_size INT DEFAULT 400;");
             jdbcTemplate.execute("ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS sliding_window_step INT DEFAULT 350;");
             jdbcTemplate.execute("ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS min_quality_score NUMERIC(5,2) DEFAULT 0.30;");
+            jdbcTemplate.execute("ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS recall_top_k INT DEFAULT 300;");
+            jdbcTemplate.execute("ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS fusion_top_k INT DEFAULT 200;");
+            jdbcTemplate.execute("ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS rerank_top_k INT DEFAULT 50;");
+            jdbcTemplate.execute("ALTER TABLE sys_ai_tuning_config ADD COLUMN IF NOT EXISTS rerank_global_max_chars INT DEFAULT 12000;");
             
             logger.info("✅ 数据库自愈探测：成功确认或注入高级语义分片与元信息提取核心字段。");
         } catch (Exception e) {
@@ -76,6 +80,10 @@ public class SysAiTuningConfigServiceImpl extends ServiceImpl<SysAiTuningConfigM
             config.setBm25Weight(new BigDecimal("0.30"));
             config.setVectorWeight(new BigDecimal("0.70"));
             config.setRrfWindowSize(60);
+            config.setRecallTopK(300);
+            config.setFusionTopK(200);
+            config.setRerankTopK(50);
+            config.setRerankGlobalMaxChars(12000);
             config.setCircuitBreakerEnabled(false);
             
             // 补充隐藏参数默认值

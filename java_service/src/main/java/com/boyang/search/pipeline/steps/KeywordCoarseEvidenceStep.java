@@ -57,7 +57,7 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
 
         Map<String, List<Map<String, Object>>> chunksByDoc = new LinkedHashMap<>();
         List<Map<String, Object>> enrichedDocs = new ArrayList<>();
-        int limit = Math.min(docs.size(), Math.max(context.getTopK() * 3, context.getTopK()));
+        int limit = Math.min(docs.size(), Math.max(context.getReturnTopK() * 3, context.getReturnTopK()));
 
         List<Map<String, Object>> limitedDocs = new ArrayList<>();
         List<String> docIds = new ArrayList<>();

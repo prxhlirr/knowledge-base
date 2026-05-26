@@ -238,10 +238,13 @@ public class RerankStep implements SearchPipelineStep {
                 && !"keyword".equals(context.getSearchMode())
                 && !Boolean.TRUE.equals(config.getCircuitBreakerEnabled())
                 && !docTexts.isEmpty();
+        if (!shouldRunReranker && Boolean.TRUE.equals(config.getCircuitBreakerEnabled())) {
+            context.setRerankDegraded(true);
+        }
 
         int effectiveLimit = 0;
         if (shouldRunReranker) {
-            int rerankLimit = config.getRerankLimit() != null ? config.getRerankLimit() : 15;
+            int rerankLimit = context.getRerankTopK();
             String mode = aiEngineGateway.getCachedAcceleration();
 
             // [弹性机制] 判断上帝模式，以便在 CPU 调试时打破 12 的枷锁测试功能
@@ -257,7 +260,7 @@ public class RerankStep implements SearchPipelineStep {
                 rerankLimit = Math.min(rerankLimit, 12);
             } else {
                 // 如果拥有 GPU 算力或者处于上帝模式，动态随需扩大（最大放开到 100 供分页）
-                rerankLimit = Math.max(rerankLimit, Math.min(context.getTopK(), 100));
+                rerankLimit = Math.max(rerankLimit, Math.min(context.getReturnTopK(), 100));
             }
 
             // Pre-rerank Diversity Selection: Prioritize different organizations/files
@@ -265,6 +268,7 @@ public class RerankStep implements SearchPipelineStep {
             Set<String> seenOrgs = new HashSet<>();
             List<Integer> deferredIndices = new ArrayList<>();
             effectiveLimit = Math.min(docTexts.size(), rerankLimit);
+            context.setRerankInputCount(effectiveLimit);
             for (int i = 0; i < docTexts.size(); i++) {
                 Map<String, Object> source = (Map<String, Object>) candidates.get(i).get("_source");
                 String org = source != null ? (String) source.getOrDefault("organization", "") : "";
@@ -305,14 +309,14 @@ public class RerankStep implements SearchPipelineStep {
             docTexts.addAll(newDocTexts);
 
             // Limit characters completely
-            final int MAX_GLOBAL_CHARS = 3500;
+            final int maxGlobalChars = context.getRerankGlobalMaxChars();
             List<String> limitedDocs = new ArrayList<>();
             int currentChars = 0;
 
             for (int i = 0; i < effectiveLimit; i++) {
                 String d = docTexts.get(i);
-                if (currentChars + d.length() > MAX_GLOBAL_CHARS) {
-                    int rem = Math.max(0, MAX_GLOBAL_CHARS - currentChars);
+                if (currentChars + d.length() > maxGlobalChars) {
+                    int rem = Math.max(0, maxGlobalChars - currentChars);
                     if (rem > 50) {
                         limitedDocs.add(d.substring(0, rem));
                         currentChars += rem;
@@ -325,11 +329,13 @@ public class RerankStep implements SearchPipelineStep {
 
             // [P1-1 修复] ColBERT 调用包裹 Semaphore 背压拤控，防止并发峰候爆 GPU
             // 弹性排队优化：赋予 500ms 缓冲池平滑瞬时波峰，避免大面积静默降级 RRF
+            context.setRerankInputCount(limitedDocs.size());
             boolean acquired = false;
             try {
                 acquired = COLBERT_SEM.tryAcquire(500, TimeUnit.MILLISECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                context.setRerankDegraded(true);
             }
             if (acquired) {
                 try {
@@ -338,13 +344,17 @@ public class RerankStep implements SearchPipelineStep {
                             .supplyAsync(() -> aiEngineGateway.fetchColbertScores(queryText, limitedDocs))
                             .get(colbertTimeoutMs, TimeUnit.MILLISECONDS);
                 } catch (TimeoutException te) {
+                    context.setRerankDegraded(true);
                     System.err.printf("[ColBERT] 超时(%dms)，降级 RRF 排序%n", forceRerankForSemantics ? 8000 : 6000);
                 } catch (Exception ex) {
+                    context.setRerankDegraded(true);
                     System.err.println("[ColBERT] 调用异常，降?RRF 排序: " + ex.getMessage());
                 } finally {
                     COLBERT_SEM.release(); // finally 保证必然释放，防止信号量泄漏
                 }
             } else {
+                context.setRerankDegraded(true);
+                context.setRerankSemaphoreRejected(true);
                 System.out.printf("[ColBERT Semaphore] 超出并发上限 %d，降?RRF 排序%n", COLBERT_SEM_MAX);
             }
 
@@ -777,7 +787,7 @@ public class RerankStep implements SearchPipelineStep {
         // 构建最终结果：每个文档作为一个结果项
         prefetchEvidenceContextChunks(collapsedResults, context);
         List<Map<String, Object>> results = new ArrayList<>();
-        int limit = Math.min(collapsedResults.size(), context.getTopK());
+        int limit = Math.min(collapsedResults.size(), context.getReturnTopK());
         for (int i = 0; i < limit; i++) {
             Map<String, Object> docMap = collapsedResults.get(i);
             Map<String, Object> source = (Map<String, Object>) docMap.get("_source");

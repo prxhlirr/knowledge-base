@@ -95,7 +95,7 @@ public class KeywordRecallStrategy implements RecallStrategy {
         Map<String, Double> docScoresById = new HashMap<>();
         Map<String, Set<String>> docIdsByTerm = searchCandidateDocsByTerm(indexPattern, requiredTerms,
                 getEsTimeoutMs(config), isAnonymous, finalUserId, deptValues, forceSource,
-                docSourcesById, docScoresById, context.getTopK());
+                docSourcesById, docScoresById, context.getRecallTopK());
 
         // 关键词模式在召回层只枚举“文档集合”，后续再做集合交集和 coarse 证据查询。
         context.setKeywordChunkHits(Collections.emptyList());
@@ -107,6 +107,10 @@ public class KeywordRecallStrategy implements RecallStrategy {
         context.setSparseResponse(null);
         context.setQaHits(Collections.emptyList());
         context.setBm25TextHits(docSourcesById.size());
+        context.setBm25Hits(docSourcesById.size());
+        context.setKnnHits(0);
+        context.setSparseHits(0);
+        context.setQaHitsCount(0);
 
         System.out.printf("[KeywordStrategy] terms=%s docEnumTotal=%d | QA disabled%n",
             requiredTerms, docSourcesById.size());

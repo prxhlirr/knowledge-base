@@ -79,7 +79,7 @@ public class SemanticRecallStrategy implements RecallStrategy {
             knnRequest = new SearchRequest.Builder()
                 .index(indexPattern)
                 .knn(k -> {
-                    int kVal = Math.max(context.getTopK() * 3, 100);
+                    int kVal = Math.max(context.getRecallTopK(), 100);
                     // [P1 修复] ES 要求 numCandidates >= k，取 max 确保约束成立，避免 ES 报错
                     int numCandidates = Math.max(config.getKnnNumCandidates(), kVal * 2);
                     return k.field("vector").queryVector(queryVector)
@@ -136,7 +136,7 @@ public class SemanticRecallStrategy implements RecallStrategy {
 
                 SearchRequest sparseReq = new SearchRequest.Builder()
                     .index(indexPattern)
-                    .size(Math.max(context.getTopK() * 2, 40))
+                    .size(Math.max(context.getRecallTopK(), 40))
                     .timeout("2000ms")
                     .query(q -> q.bool(b -> {
                         for (int i = 0; i < TOP_N_SPARSE; i++) {
@@ -177,7 +177,7 @@ public class SemanticRecallStrategy implements RecallStrategy {
                 try {
                     SearchRequest bm25Req = new SearchRequest.Builder()
                         .index(indexPattern)
-                        .size(Math.max(context.getTopK(), 20))
+                        .size(Math.max(context.getRecallTopK(), 20))
                         .timeout("2000ms")
                         .query(q -> q.bool(b -> {
                             // 宽松 BM25（30%），目的是兜底，不是主导排序
@@ -251,6 +251,10 @@ public class SemanticRecallStrategy implements RecallStrategy {
         context.setSparseResponse(sparseResponse);
         // [架构重构] 写入 QA 第四路召回结果，供 RrfFusionStep 作为第四路融合
         context.setQaHits(qaHits != null ? qaHits : java.util.Collections.emptyList());
+        context.setBm25Hits(bm25FallbackResp != null ? bm25FallbackResp.hits().hits().size() : 0);
+        context.setKnnHits(knnResponse != null ? knnResponse.hits().hits().size() : 0);
+        context.setSparseHits(sparseResponse != null ? sparseResponse.hits().hits().size() : 0);
+        context.setQaHitsCount(qaHits != null ? qaHits.size() : 0);
 
         // 更新 BM25 命中数（供 RrfFusionStep 动态权重计算）
         long bm25Hits = (bm25FallbackResp != null && bm25FallbackResp.hits() != null

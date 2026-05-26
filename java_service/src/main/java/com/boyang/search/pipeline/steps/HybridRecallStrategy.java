@@ -80,6 +80,8 @@ public class HybridRecallStrategy implements RecallStrategy {
                 .query(q -> q.bool(b -> {
                     b.should(s -> s.term(t -> t.field("metadata.source").value(normalizedQuery)));
                     b.should(s -> s.term(t -> t.field("metadata.document_number").value(normalizedQuery)));
+                    b.should(s -> s.term(t -> t.field("metadata.title.keyword").value(normalizedQuery)));
+                    b.should(s -> s.matchPhrase(mp -> mp.field("metadata.title").query(normalizedQuery).slop(0).boost(5.0f)));
                     b.minimumShouldMatch("1");
                     b.filter(f -> f.bool(boolQuery -> boolQuery
                         .should(s -> s.term(t -> t.field("metadata.is_latest").value(true)))
@@ -140,7 +142,7 @@ public class HybridRecallStrategy implements RecallStrategy {
         SearchRequest textRequest = new SearchRequest.Builder()
             .index(indexPattern)
             .trackTotalHits(h -> h.count(200))
-            .size(Math.max(context.getTopK() * 2, 60))
+            .size(Math.max(context.getRecallTopK(), 60))
             .timeout(config.getEsQueryTimeout() + "ms")
             .query(q -> q.bool(b -> {
                 // 核心词 Boost 子句（最高优先级）
@@ -217,7 +219,7 @@ public class HybridRecallStrategy implements RecallStrategy {
             knnRequest = new SearchRequest.Builder()
                 .index(indexPattern)
                 .knn(k -> {
-                    int kVal = Math.max(context.getTopK() * 3, 100);
+                    int kVal = Math.max(context.getRecallTopK(), 100);
                     // [P1 修复] ES 要求 numCandidates >= k，取 max 确保约束成立
                     int numCandidates = Math.max(config.getKnnNumCandidates(), kVal * 2);
                     return k.field("vector").queryVector(queryVector)
@@ -272,7 +274,7 @@ public class HybridRecallStrategy implements RecallStrategy {
                 final int TOP_N_SPARSE = Math.min(16, sortedEntries.size());
                 SearchRequest sparseReq = new SearchRequest.Builder()
                     .index(indexPattern)
-                    .size(Math.max(context.getTopK() * 2, 40))
+                    .size(Math.max(context.getRecallTopK(), 40))
                     .timeout("2000ms")
                     .query(q -> q.bool(b -> {
                         for (int i = 0; i < TOP_N_SPARSE; i++) {
@@ -351,6 +353,10 @@ public class HybridRecallStrategy implements RecallStrategy {
         context.setSparseResponse(sparseResponse);
         // [架构重构] 写入 QA 第四路召回结果，供 RrfFusionStep 作为第四路融合
         context.setQaHits(qaHits != null ? qaHits : java.util.Collections.emptyList());
+        context.setBm25Hits(textResponse != null ? textResponse.hits().hits().size() : 0);
+        context.setKnnHits(knnResponse != null ? knnResponse.hits().hits().size() : 0);
+        context.setSparseHits(sparseResponse != null ? sparseResponse.hits().hits().size() : 0);
+        context.setQaHitsCount(qaHits != null ? qaHits.size() : 0);
 
         // 写入 BM25 命中数和平坦度（RerankStep 消歧用）
         long textTotalHits = (textResponse != null && textResponse.hits() != null
@@ -428,7 +434,7 @@ public class HybridRecallStrategy implements RecallStrategy {
                 co.elastic.clients.elasticsearch.core.SearchRequest subKnnReq =
                     new co.elastic.clients.elasticsearch.core.SearchRequest.Builder()
                         .index(indexPattern)
-                        .knn(knn -> knn.field("dense_vector").queryVector(subVec).k(20).numCandidates(100))
+                        .knn(knn -> knn.field("vector").queryVector(subVec).k(20).numCandidates(100))
                         .size(20)
                         .source(s -> s.fetch(true))
                         .build();

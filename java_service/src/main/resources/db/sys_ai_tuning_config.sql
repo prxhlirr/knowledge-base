@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS sys_ai_tuning_config (
     bm25_weight                         NUMERIC(5,2)    DEFAULT 0.30,
     vector_weight                       NUMERIC(5,2)    DEFAULT 0.70,
     rrf_window_size                     INT             DEFAULT 60,
+    recall_top_k                        INT             DEFAULT 300,
+    fusion_top_k                        INT             DEFAULT 200,
+    rerank_top_k                        INT             DEFAULT 50,
+    rerank_global_max_chars             INT             DEFAULT 12000,
 
     -- 全局熔断开关（true=跳过 AI 降级纯 BM25，仅故障时临时启用）
     circuit_breaker_enabled             BOOLEAN         DEFAULT false,

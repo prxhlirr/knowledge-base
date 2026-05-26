@@ -1,10 +1,17 @@
+import os
 import time
 import numpy as np
 import urllib.parse
 from typing import List
 from elasticsearch import Elasticsearch, helpers
 
-from core.indexing.es_setup import INDEX_NAME, QA_INDEX_NAME, DOC_META_INDEX
+from core.indexing.es_setup import INDEX_NAME, QA_INDEX_NAME, DOC_META_WRITE_ALIAS
+
+
+def _default_acl_tokens() -> list[str]:
+    raw = os.getenv("KB_DOC_META_DEFAULT_ACL_TOKENS", "_INTERNAL")
+    tokens = [token.strip() for token in raw.split(",") if token.strip()]
+    return tokens or ["_INTERNAL"]
 
 
 class DocIndexer:
@@ -66,7 +73,8 @@ class DocIndexer:
 
 
     def update_doc_meta(self, source_name: str, chunk_actions: list,
-                        data_source: str = "document", content_hash: str = None, acl_tokens: list = None):
+                        data_source: str = "document", content_hash: str = None,
+                        acl_tokens: list = None, doc_id: str = None, doc_version: int = None):
         """
         业务功能：将所有 fine chunk 向量均值池化为 doc_vector，写入 kb_doc_meta（供相似文档搜索）。
         核心原理：doc_vector = mean(fine chunk vectors) → L2 normalize
@@ -90,17 +98,51 @@ class DocIndexer:
         if norm > 0:
             mean_vec = mean_vec / norm
 
-        doc_id = urllib.parse.quote(source_name, safe="")
+        first_source = next(
+            (action.get("_source", {}) for action in chunk_actions if action.get("_source")),
+            {},
+        )
+        first_meta = first_source.get("metadata", {}) if isinstance(first_source.get("metadata"), dict) else {}
+        title = first_meta.get("title") or first_source.get("title") or source_name
+        summary_text = first_source.get("content") or ""
+        if len(summary_text) > 500:
+            summary_text = summary_text[:500]
+
+        meta_es_id = urllib.parse.quote(doc_id or content_hash or source_name, safe="")
         body = {
+            "doc_id":       doc_id or "",
+            "doc_version":  doc_version,
             "source":       source_name,
             "source_name":  source_name,
+            "title":        title,
+            "summary":      summary_text,
+            "doc_type":     first_meta.get("doc_type") or "",
             "data_source":  data_source,
             "chunk_count":  len(fine_vectors),
             "doc_vector":   mean_vec.tolist(),
             "updated_at":   int(time.time() * 1000),
             "content_hash": content_hash,
             "is_latest":    True,
-            "acl_tokens":   acl_tokens or ["_PUBLIC"],
+            "acl_tokens":   acl_tokens or _default_acl_tokens(),
+            "visibility":   first_meta.get("visibility") or "",
+            "owner_dept_id": first_meta.get("owner_dept_id") or "",
         }
-        self.es.index(index=DOC_META_INDEX, id=doc_id, body=body)
-        print(f"✅ [DocMeta] kb_doc_meta 已同步: '{source_name}' ({len(fine_vectors)} fine chunks → doc_vector)")
+        try:
+            self.es.update_by_query(
+                index=DOC_META_WRITE_ALIAS,
+                body={
+                    "script": {"source": "ctx._source.is_latest = false", "lang": "painless"},
+                    "query": {"bool": {"filter": [
+                        {"term": {"source": source_name}},
+                        {"term": {"data_source": data_source}},
+                        *([{"term": {"owner_dept_id": first_meta.get("owner_dept_id")}}]
+                          if first_meta.get("owner_dept_id") else []),
+                    ]}},
+                },
+                conflicts="proceed",
+                refresh=False,
+            )
+        except Exception as e:
+            print(f"  [DocMeta] mark old versions non-latest skipped: {e}")
+        self.es.index(index=DOC_META_WRITE_ALIAS, id=meta_es_id, body=body)
+        print(f"✅ [DocMeta] {DOC_META_WRITE_ALIAS} 已同步: '{source_name}' ({len(fine_vectors)} fine chunks → doc_vector)")

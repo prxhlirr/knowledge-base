@@ -1,11 +1,14 @@
 package com.boyang.search.service;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch._types.FieldValue;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
+import co.elastic.clients.elasticsearch._types.query_dsl.BoolQuery;
 import com.boyang.search.security.JwtVerifier;
 import com.boyang.search.security.PermissionGuard;
+import com.boyang.search.security.UserContextHolder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -62,6 +65,39 @@ public class SimilarityService {
 
     @Value("${editor.similarity.cache-ttl-seconds:60}")
     private long editorSimilarityCacheTtlSeconds;
+
+    @Value("${editor.similarity.meta-index:kb_doc_meta_read}")
+    private String editorSimilarityMetaIndex;
+
+    @Value("${editor.similarity.chunk-fallback-index:kb_document}")
+    private String editorSimilarityChunkFallbackIndex;
+
+    @Value("${editor.similarity.max-candidates:20}")
+    private int editorSimilarityMaxCandidates;
+
+    @Value("${editor.similarity.knn-num-candidates:120}")
+    private int editorSimilarityKnnNumCandidates;
+
+    @Value("${editor.similarity.rerank-enabled:true}")
+    private boolean editorSimilarityRerankEnabled;
+
+    @Value("${editor.similarity.rerank-min-score:0.50}")
+    private double editorSimilarityRerankMinScore;
+
+    @Value("${editor.similarity.rerank-weight:0.90}")
+    private double editorSimilarityRerankWeight;
+
+    @Value("${editor.similarity.evidence-enabled:true}")
+    private boolean editorSimilarityEvidenceEnabled;
+
+    @Value("${editor.similarity.evidence-fetch-docs:10}")
+    private int editorSimilarityEvidenceFetchDocs;
+
+    @Value("${editor.similarity.evidence-top-k:2}")
+    private int editorSimilarityEvidenceTopK;
+
+    @Value("${editor.similarity.evidence-max-chars:1200}")
+    private int editorSimilarityEvidenceMaxChars;
 
     /** ?RestTemplate ?SearchService ? */
     private final RestTemplate restTemplate;
@@ -275,12 +311,17 @@ public class SimilarityService {
             int kFetch = Math.min(topK + 3, 20); // ?topK
 
             SearchRequest knnReq = new SearchRequest.Builder()
-                    .index("kb_doc_meta")
+                    .index(editorSimilarityMetaIndex)
                     .knn(k -> k.field("doc_vector")
                             .queryVector(finalQueryVec)
                             .k(kFetch)
-                            .numCandidates(50))
+                            .numCandidates(Math.max(kFetch, editorSimilarityKnnNumCandidates))
+                            .filter(f -> f.bool(b -> {
+                                appendLatestFilter(b, "is_latest");
+                                return b;
+                            })))
                     .size(kFetch)
+                    .source(s -> s.filter(f -> f.excludes(Arrays.asList("doc_vector"))))
                     .build();
 
             SearchResponse<Object> knnResp = esClient.search(knnReq, Object.class);
@@ -322,6 +363,7 @@ public class SimilarityService {
             data.put("items", items);
             data.put("costMs", costMs);
             data.put("total", items.size());
+            data.put("metaIndex", editorSimilarityMetaIndex);
 
             result.put("code", 200);
             result.put("data", data);
@@ -406,15 +448,20 @@ public class SimilarityService {
             int candidateCount = 0;
             boolean fallbackUsed = false;
 
-            int fetchSize = Math.max(topK * 4, topK + 5);
+            int fetchSize = Math.min(Math.max(topK * 4, topK + 5), Math.max(topK, editorSimilarityMaxCandidates));
             long knnStart = System.currentTimeMillis();
             try {
                 SearchRequest knnReq = new SearchRequest.Builder()
-                        .index("kb_doc_meta")
+                        .index(editorSimilarityMetaIndex)
                         .knn(k -> k.field("doc_vector")
                                 .queryVector(queryVec)
-                                .k(Math.min(fetchSize, 50))
-                                .numCandidates(Math.max(50, fetchSize * 5)))
+                                .k(fetchSize)
+                                .numCandidates(Math.max(fetchSize, editorSimilarityKnnNumCandidates))
+                                .filter(f -> f.bool(b -> {
+                                    appendLatestFilter(b, "is_latest");
+                                    appendAclFilter(b, "acl_tokens", identity);
+                                    return b;
+                                })))
                         .size(Math.min(fetchSize, 50))
                         .source(s -> s.filter(f -> f.excludes(Arrays.asList("doc_vector"))))
                         .build();
@@ -463,7 +510,7 @@ public class SimilarityService {
                 fallbackUsed = true;
                 timings.put("meta_knn_error", abbreviate(metaKnnError.getMessage(), 240));
                 long fallbackStart = System.currentTimeMillis();
-                SearchResponse<Object> chunkResp = searchEditorSimilarChunks(queryVec, fetchSize);
+                SearchResponse<Object> chunkResp = searchEditorSimilarChunks(queryVec, fetchSize, identity);
                 timings.put("chunk_fallback_ms", System.currentTimeMillis() - fallbackStart);
                 candidateCount = chunkResp.hits().hits().size();
 
@@ -474,6 +521,11 @@ public class SimilarityService {
                 belowThresholdCount += counters[1];
                 timings.put("permission_ms", System.currentTimeMillis() - permissionStart);
             }
+            long evidenceStart = System.currentTimeMillis();
+            int evidenceCount = enrichEditorCandidatesWithEvidence(queryVec, candidates, identity);
+            timings.put("evidence_ms", System.currentTimeMillis() - evidenceStart);
+            timings.put("evidence_count", evidenceCount);
+
             long rerankStart = System.currentTimeMillis();
             items = rerankEditorCandidates(normalizedText, candidates, topK);
             timings.put("rerank_ms", System.currentTimeMillis() - rerankStart);
@@ -482,6 +534,8 @@ public class SimilarityService {
             timings.put("denied_count", deniedCount);
             timings.put("below_threshold_count", belowThresholdCount);
             timings.put("fallback_used", fallbackUsed);
+            timings.put("meta_index", editorSimilarityMetaIndex);
+            timings.put("chunk_fallback_index", editorSimilarityChunkFallbackIndex);
 
             data.put("items", items);
             data.put("total", items.size());
@@ -544,7 +598,10 @@ public class SimilarityService {
             String excludeSource) {
         String userId = identity == null ? "anonymous" : stringValue(identity.getUserId());
         String raw = stringValue(appCode) + "|" + userId + "|" + topK + "|"
-                + stringValue(excludeDocId) + "|" + stringValue(excludeSource) + "|" + text;
+                + stringValue(excludeDocId) + "|" + stringValue(excludeSource) + "|"
+                + editorSimilarityEvidenceEnabled + "|" + editorSimilarityEvidenceFetchDocs + "|"
+                + editorSimilarityEvidenceTopK + "|" + editorSimilarityEvidenceMaxChars + "|"
+                + editorSimilarityRerankWeight + "|" + editorSimilarityRerankMinScore + "|" + text;
         return "editor:similar:" + stringValue(appCode) + ":" + userId + ":" + sha256(raw);
     }
 
@@ -621,22 +678,171 @@ public class SimilarityService {
         return text.length() <= maxLen ? text : text.substring(0, maxLen) + "...";
     }
 
-    private SearchResponse<Object> searchEditorSimilarChunks(List<Double> queryVec, int fetchSize) throws Exception {
+    private void appendLatestFilter(BoolQuery.Builder b, String field) {
+        b.filter(ft -> ft.bool(boolQuery -> boolQuery
+                .should(s -> s.term(t -> t.field(field).value(true)))
+                .should(s -> s.bool(bNot -> bNot.mustNot(mn -> mn.exists(e -> e.field(field)))))
+                .minimumShouldMatch("1")));
+    }
+
+    private void appendAclFilter(BoolQuery.Builder b,
+            String field,
+            JwtVerifier.UserIdentity identity) {
+        if (identity != null && identity.isSuperAdmin()) {
+            return;
+        }
+        Set<String> tokens = (identity != null && identity.getAclTokens() != null && !identity.getAclTokens().isEmpty())
+                ? identity.getAclTokens()
+                : UserContextHolder.getAclTokens();
+        if (tokens == null || tokens.isEmpty()) {
+            tokens = Collections.singleton("_PUBLIC");
+        }
+        List<FieldValue> values = new ArrayList<>();
+        for (String token : tokens) {
+            if (token != null && !token.trim().isEmpty()) {
+                values.add(FieldValue.of(token.trim()));
+            }
+        }
+        if (values.isEmpty()) {
+            values.add(FieldValue.of("_PUBLIC"));
+        }
+        b.filter(ft -> ft.terms(t -> t.field(field).terms(tv -> tv.value(values))));
+    }
+
+    private SearchResponse<Object> searchEditorSimilarChunks(List<Double> queryVec,
+            int fetchSize,
+            JwtVerifier.UserIdentity identity) throws Exception {
         int size = Math.min(Math.max(fetchSize * 3, 30), 80);
         return esClient.search(new SearchRequest.Builder()
-                .index("kb_document")
+                .index(editorSimilarityChunkFallbackIndex)
                 .knn(k -> k.field("vector")
                         .queryVector(queryVec)
                         .k(size)
                         .numCandidates(Math.max(100, size * 4))
-                        .filter(f -> f.bool(b -> b
-                                .filter(ft -> ft.bool(boolQuery -> boolQuery
-                                        .should(s -> s.term(t -> t.field("metadata.is_latest").value(true)))
-                                        .should(s -> s.bool(bNot -> bNot
-                                                .mustNot(mn -> mn.exists(e -> e.field("metadata.is_latest"))))))))))
+                        .filter(f -> f.bool(b -> {
+                            appendLatestFilter(b, "metadata.is_latest");
+                            appendAclFilter(b, "acl_tokens", identity);
+                            return b;
+                        })))
                 .size(size)
                 .source(s -> s.filter(f -> f.excludes(Arrays.asList("vector", "sparse_vector", "colloquial_vector"))))
                 .build(), Object.class);
+    }
+
+    private int enrichEditorCandidatesWithEvidence(List<Double> queryVec,
+            List<Map<String, Object>> candidates,
+            JwtVerifier.UserIdentity identity) {
+        if (!editorSimilarityEvidenceEnabled || queryVec == null || queryVec.isEmpty()
+                || candidates == null || candidates.isEmpty()) {
+            return 0;
+        }
+
+        int limit = Math.min(candidates.size(), Math.max(0, editorSimilarityEvidenceFetchDocs));
+        int enriched = 0;
+        for (int i = 0; i < limit; i++) {
+            Map<String, Object> item = candidates.get(i);
+            String docId = stringValue(item.get("docId"));
+            String source = stringValue(item.get("source"));
+            String evidence = fetchBestChunkEvidence(queryVec, docId, source, identity);
+            if (evidence.isEmpty()) {
+                continue;
+            }
+
+            item.put("evidence", abbreviate(evidence, 300));
+            item.put("evidenceUsed", true);
+            item.put("_rerankText", buildRerankText(
+                    stringValue(item.get("title")),
+                    source,
+                    stringValue(item.get("snippet")),
+                    evidence));
+            enriched++;
+        }
+        return enriched;
+    }
+
+    private String fetchBestChunkEvidence(List<Double> queryVec,
+            String docId,
+            String source,
+            JwtVerifier.UserIdentity identity) {
+        if (stringValue(docId).isEmpty() && stringValue(source).isEmpty()) {
+            return "";
+        }
+        int topK = Math.max(1, editorSimilarityEvidenceTopK);
+        int maxChars = Math.max(200, editorSimilarityEvidenceMaxChars);
+        try {
+            SearchResponse<Object> resp = esClient.search(new SearchRequest.Builder()
+                    .index(editorSimilarityChunkFallbackIndex)
+                    .knn(k -> k.field("vector")
+                            .queryVector(queryVec)
+                            .k(topK)
+                            .numCandidates(Math.max(20, topK * 10))
+                            .filter(f -> f.bool(b -> {
+                                appendLatestFilter(b, "metadata.is_latest");
+                                appendAclFilter(b, "acl_tokens", identity);
+                                appendDocIdentityFilter(b, docId, source);
+                                return b;
+                            })))
+                    .size(topK)
+                    .source(s -> s.filter(f -> f.excludes(Arrays.asList("vector", "sparse_vector", "colloquial_vector"))))
+                    .build(), Object.class);
+
+            StringBuilder sb = new StringBuilder();
+            Set<String> seen = new LinkedHashSet<>();
+            for (Hit<Object> hit : resp.hits().hits()) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> src = (Map<String, Object>) hit.source();
+                if (src == null) {
+                    continue;
+                }
+                Map<String, Object> metadata = nestedMap(src.get("metadata"));
+                String text = firstNonBlank(src.get("content"), src.get("chunkText"), src.get("text"),
+                        metadata.get("content"), metadata.get("text"));
+                text = normalizeEvidenceText(text);
+                if (text.isEmpty() || !seen.add(text)) {
+                    continue;
+                }
+                if (sb.length() > 0) {
+                    sb.append("\n\n");
+                }
+                int remaining = maxChars - sb.length();
+                if (remaining <= 0) {
+                    break;
+                }
+                sb.append(text, 0, Math.min(text.length(), remaining));
+                if (sb.length() >= maxChars) {
+                    break;
+                }
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            System.err.println("[EditorSimilarityEvidence] fetch failed: " + e.getMessage());
+            return "";
+        }
+    }
+
+    private void appendDocIdentityFilter(BoolQuery.Builder b, String docId, String source) {
+        String cleanDocId = stringValue(docId);
+        String cleanSource = stringValue(source);
+        if (cleanDocId.isEmpty() && cleanSource.isEmpty()) {
+            return;
+        }
+        b.filter(ft -> ft.bool(match -> {
+            if (!cleanDocId.isEmpty()) {
+                match.should(s -> s.term(t -> t.field("metadata.doc_id").value(cleanDocId)));
+                match.should(s -> s.term(t -> t.field("doc_id").value(cleanDocId)));
+            }
+            if (!cleanSource.isEmpty()) {
+                match.should(s -> s.term(t -> t.field("metadata.source").value(cleanSource)));
+                match.should(s -> s.term(t -> t.field("source").value(cleanSource)));
+                match.should(s -> s.term(t -> t.field("file_name").value(cleanSource)));
+            }
+            return match.minimumShouldMatch("1");
+        }));
+    }
+
+    private String normalizeEvidenceText(String text) {
+        String value = stringValue(text).replaceAll("\\s+", " ").trim();
+        return value;
     }
 
     private int[] appendEditorChunkFallbackItems(SearchResponse<Object> chunkResp,
@@ -722,30 +928,44 @@ public class SimilarityService {
             documents.add(stringValue(candidate.get("_rerankText")));
         }
 
-        List<Double> rerankScores = callAiRerank(queryText, documents);
+        RerankResult rerankResult = editorSimilarityRerankEnabled ? callAiRerank(queryText, documents) : null;
+        List<Double> rerankScores = rerankResult != null ? rerankResult.scores : null;
+        List<Double> rawRerankScores = rerankResult != null ? rerankResult.rawScores : null;
+        boolean rerankUsed = rerankScores != null;
+        double rerankWeight = clamp01(editorSimilarityRerankWeight);
+        double threshold = rerankUsed ? clamp01(editorSimilarityRerankMinScore) : editorSimilarityMinScore;
         List<Map<String, Object>> accepted = new ArrayList<>();
         for (int i = 0; i < candidates.size(); i++) {
             Map<String, Object> item = new LinkedHashMap<>(candidates.get(i));
             double vectorScore = item.get("vectorScore") instanceof Number
                     ? ((Number) item.get("vectorScore")).doubleValue()
                     : 0.0;
-            double rerankScore = (rerankScores != null && i < rerankScores.size())
-                    ? normalizeRerankScore(rerankScores.get(i))
+            double rerankScore = (rerankUsed && i < rerankScores.size())
+                    ? clamp01(rerankScores.get(i))
                     : vectorScore;
-            double businessScore = rerankScores == null
+            Double rawRerankScore = (rawRerankScores != null && i < rawRerankScores.size())
+                    ? rawRerankScores.get(i)
+                    : null;
+            double businessScore = !rerankUsed
                     ? vectorScore
-                    : clamp01(rerankScore * 0.85 + vectorScore * 0.15);
-            if (businessScore < editorSimilarityMinScore) {
+                    : clamp01(rerankScore * rerankWeight + vectorScore * (1.0 - rerankWeight));
+            if (businessScore < threshold) {
                 continue;
             }
 
             item.put("similarity", round4(businessScore));
             item.put("rerankScore", round4(rerankScore));
+            if (rawRerankScore != null) {
+                item.put("rawRerankScore", round4(rawRerankScore));
+            }
+            boolean evidenceUsed = Boolean.TRUE.equals(item.get("evidenceUsed"));
             item.put("label", similarityLabel(businessScore));
-            item.put("reason", buildRerankReason(rerankScores != null, rerankScore, vectorScore));
+            item.put("reason", buildRerankReason(rerankResult, rerankScore, rawRerankScore,
+                    vectorScore, rerankWeight, threshold, evidenceUsed));
             item.put("_rankScore", businessScore);
             item.remove("_rerankText");
             item.remove("_rawScore");
+            item.remove("evidenceUsed");
             accepted.add(item);
         }
 
@@ -764,9 +984,9 @@ public class SimilarityService {
     }
 
     @SuppressWarnings("unchecked")
-    private List<Double> callAiRerank(String queryText, List<String> documents) {
+    private RerankResult callAiRerank(String queryText, List<String> documents) {
         if (documents == null || documents.isEmpty()) {
-            return Collections.emptyList();
+            return null;
         }
         try {
             Map<String, Object> payload = new LinkedHashMap<>();
@@ -782,28 +1002,102 @@ public class SimilarityService {
             if (body == null || !(body.get("scores") instanceof List)) {
                 return null;
             }
-            List<Object> rawScores = (List<Object>) body.get("scores");
-            List<Double> scores = new ArrayList<>();
-            for (Object score : rawScores) {
-                if (score instanceof Number) {
-                    scores.add(((Number) score).doubleValue());
-                }
+            List<Object> scoreValues = (List<Object>) body.get("scores");
+            List<Double> scores = toDoubleList(scoreValues);
+            if (scores.size() != documents.size()) {
+                return null;
             }
-            return scores.size() == documents.size() ? scores : null;
+
+            List<Double> rawScores = body.get("rawScores") instanceof List
+                    ? toDoubleList((List<Object>) body.get("rawScores"))
+                    : Collections.emptyList();
+            String scoreType = stringValue(body.get("scoreType"));
+            String rawScoreType = stringValue(body.get("rawScoreType"));
+
+            if (!"sigmoid_probability".equals(scoreType)) {
+                rawScores = new ArrayList<>(scores);
+                List<Double> normalizedScores = new ArrayList<>();
+                for (Double score : scores) {
+                    normalizedScores.add(sigmoid(score));
+                }
+                scores = normalizedScores;
+                scoreType = "java_sigmoid_probability";
+                rawScoreType = rawScoreType.isEmpty() ? "legacy_reranker_score" : rawScoreType;
+            }
+            if (rawScores.size() != documents.size()) {
+                rawScores = Collections.emptyList();
+            }
+            return new RerankResult(scores, rawScores, scoreType, rawScoreType);
         } catch (Exception e) {
             System.err.println("[EditorSimilarityRerank] fallback to vector score: " + e.getMessage());
             return null;
         }
     }
 
-    private Map<String, Object> buildRerankReason(boolean rerankUsed, double rerankScore, double vectorScore) {
+    private List<Double> toDoubleList(List<Object> values) {
+        List<Double> scores = new ArrayList<>();
+        if (values == null) {
+            return scores;
+        }
+        for (Object score : values) {
+            if (score instanceof Number) {
+                scores.add(((Number) score).doubleValue());
+            }
+        }
+        return scores;
+    }
+
+    private Map<String, Object> buildRerankReason(RerankResult rerankResult,
+            double rerankScore,
+            Double rawRerankScore,
+            double vectorScore,
+            double rerankWeight,
+            double threshold,
+            boolean evidenceUsed) {
+        boolean rerankUsed = rerankResult != null;
         Map<String, Object> reason = new LinkedHashMap<>();
         reason.put("rerankUsed", rerankUsed);
         reason.put("rerankScore", round4(rerankScore));
+        if (rawRerankScore != null) {
+            reason.put("rawRerankScore", round4(rawRerankScore));
+        }
         reason.put("vectorScore", round4(vectorScore));
+        reason.put("threshold", round4(threshold));
+        reason.put("evidenceUsed", evidenceUsed);
+        if (rerankUsed) {
+            reason.put("scoreType", rerankResult.scoreType);
+            reason.put("rawScoreType", rerankResult.rawScoreType);
+            reason.put("rerankWeight", round4(rerankWeight));
+        }
         reason.put("summary", rerankUsed ? "AI reranker judged document-level relevance"
                 : "Reranker unavailable; vector score fallback");
         return reason;
+    }
+
+    private double sigmoid(double score) {
+        if (Double.isNaN(score) || Double.isInfinite(score)) {
+            return 0.0;
+        }
+        if (score >= 0.0) {
+            double z = Math.exp(-score);
+            return 1.0 / (1.0 + z);
+        }
+        double z = Math.exp(score);
+        return z / (1.0 + z);
+    }
+
+    private static class RerankResult {
+        private final List<Double> scores;
+        private final List<Double> rawScores;
+        private final String scoreType;
+        private final String rawScoreType;
+
+        private RerankResult(List<Double> scores, List<Double> rawScores, String scoreType, String rawScoreType) {
+            this.scores = scores;
+            this.rawScores = rawScores;
+            this.scoreType = scoreType;
+            this.rawScoreType = rawScoreType;
+        }
     }
 
     private double calibrateEsVectorScore(double rawScore) {
@@ -813,14 +1107,11 @@ public class SimilarityService {
         return clamp01(rawScore);
     }
 
-    private double normalizeRerankScore(double score) {
-        if (score >= 0.0 && score <= 1.0) {
-            return score;
-        }
-        return 1.0 / (1.0 + Math.exp(-score));
+    private String buildRerankText(String title, String source, String snippet) {
+        return buildRerankText(title, source, snippet, "");
     }
 
-    private String buildRerankText(String title, String source, String snippet) {
+    private String buildRerankText(String title, String source, String snippet, String evidence) {
         StringBuilder sb = new StringBuilder();
         if (!stringValue(title).isEmpty()) {
             sb.append("title: ").append(title).append('\n');
@@ -829,7 +1120,10 @@ public class SimilarityService {
             sb.append("source: ").append(source).append('\n');
         }
         if (!stringValue(snippet).isEmpty()) {
-            sb.append("content: ").append(snippet);
+            sb.append("summary: ").append(snippet).append('\n');
+        }
+        if (!stringValue(evidence).isEmpty()) {
+            sb.append("matched_content:\n").append(evidence);
         }
         return sb.toString().trim();
     }

@@ -24,6 +24,13 @@ public class SearchContext {
     private String appCode;
     private String queryText;
     private int topK;
+    // External return window and internal processing windows are intentionally
+    // decoupled. topK is kept as a legacy alias for returnTopK.
+    private int returnTopK = 50;
+    private int recallTopK = 300;
+    private int fusionTopK = 200;
+    private int rerankTopK = 50;
+    private int rerankGlobalMaxChars = 12000;
     private Map<String, Object> filters;
 
     /**
@@ -44,6 +51,17 @@ public class SearchContext {
     private long startTime;
     private boolean evidencePrefetchEnabled;
     private Map<String, Object> timings = new LinkedHashMap<>();
+    private int literalHitCount;
+    private int bm25Hits;
+    private int knnHits;
+    private int sparseHits;
+    private int qaHitsCount;
+    private int rrfCandidateCount;
+    private int rerankInputCount;
+    private boolean rerankDegraded;
+    private boolean rerankSemaphoreRejected;
+    private boolean llmSemaphoreRejected;
+    private int postFilterDeniedCount;
 
     // ──────────────────────
     // 3. 意图梳理与文本规范化

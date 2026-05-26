@@ -76,10 +76,10 @@ public class FileController {
                     docId.trim(), fileDocId, doc != null);
         }
 
-        // 2. 备用：用 sourceName 查最新版本
+        // 2. 备用：用 sourceName 查最新可预览版本，跳过 PROCESSING/空路径草稿
         if (doc == null && sourceName != null && !sourceName.trim().isEmpty()) {
-            doc = docRegistryService.findLatest(sourceName.trim());
-            log.info("[FileController] sourceName 备用查找: sourceName={} → found={}",
+            doc = docRegistryService.findLatestPreviewable(sourceName.trim());
+            log.info("[FileController] sourceName 可预览备用查找: sourceName={} → found={}",
                     sourceName.trim(), doc != null);
         }
 

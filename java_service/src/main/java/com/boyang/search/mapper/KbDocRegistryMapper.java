@@ -45,6 +45,18 @@ public interface KbDocRegistryMapper extends BaseMapper<KbDocRegistry> {
     KbDocRegistry findLatestBySourceName(@Param("sourceName") String sourceName);
 
     /**
+     * 查询可预览的最新文档版本。
+     *
+     * PROCESSING 草稿由 getNextVersion 预占版本时创建，storage_path 可能为空；
+     * 预览链路不能命中这类占位记录，否则会遮挡仍可用的旧版本。
+     */
+    @Select("SELECT * FROM kb_doc_registry WHERE source_name = #{sourceName} " +
+            "AND status IN ('INDEXED','INDEXED_FULL','INDEXED_PARTIAL') " +
+            "AND storage_path IS NOT NULL AND TRIM(storage_path) <> '' " +
+            "ORDER BY doc_version DESC LIMIT 1")
+    KbDocRegistry findLatestPreviewableBySourceName(@Param("sourceName") String sourceName);
+
+    /**
      * 分页查询文档列表（支持关键词搜索 + 状态筛选）。
      * 关键词匹配 source_name / unit / doc_number / tags。
      *

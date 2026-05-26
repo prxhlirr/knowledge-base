@@ -8,6 +8,7 @@ import com.boyang.search.entity.KbDocRegistry;
 import com.boyang.search.mapper.KbDocRegistryMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -32,6 +33,9 @@ public class KbDocRegistryService {
     private final KbDocRegistryMapper registryMapper;
     /** [P0 #11] 注入 ES 客户端，deleteDoc() 删除时同步将文档 chunk is_latest 置 false */
     private final ElasticsearchClient esClient;
+
+    @Value("${editor.similarity.meta-write-index:kb_doc_meta_write}")
+    private String docMetaWriteIndex;
 
     /**
      * 注册一个新版本文档。
@@ -253,7 +257,7 @@ public class KbDocRegistryService {
         // 匹配字段：source_name（kb_doc_meta 中的 keyword 副本字段，与写入时保持一致）
         try {
             UpdateByQueryRequest metaReq = UpdateByQueryRequest.of(r -> r
-                    .index("kb_doc_meta")
+                    .index(docMetaWriteIndex)
                     .query(q -> q.term(t -> t.field("source_name").value(sourceName)))
                     .script(s -> s.inline(i -> i
                             .source("ctx._source.is_latest = false")
@@ -311,6 +315,16 @@ public class KbDocRegistryService {
      */
     public KbDocRegistry findLatest(String sourceName) {
         return registryMapper.findLatestBySourceName(sourceName);
+    }
+
+    /**
+     * 按文件名查询最新的可预览版本。
+     *
+     * 与 findLatest 不同，这里会跳过 PROCESSING 草稿和 storage_path 为空的记录，
+     * 避免异步回调失败的占位版本挡住已有可预览版本。
+     */
+    public KbDocRegistry findLatestPreviewable(String sourceName) {
+        return registryMapper.findLatestPreviewableBySourceName(sourceName);
     }
 
     /**

@@ -42,6 +42,9 @@ public class SearchServiceV2 {
     private QueryNormalizeStep queryNormalizeStep;
 
     @Autowired
+    private LiteralRecallStep literalRecallStep;
+
+    @Autowired
     private VectorFetchStep vectorFetchStep;
 
     @Autowired
@@ -146,6 +149,7 @@ public class SearchServiceV2 {
             boolean enableAnswerQaRecall) throws Exception {
         long startMs = System.currentTimeMillis();
         System.out.println("====== [SearchServiceV2 Pipeline Start] ======");
+        aiEngineGateway.clearLlmSemaphoreRejected();
 
         SysTenantPolicy policy = sysTenantPolicyService.getByAppCode(appCode);
         if (policy == null) {
@@ -158,10 +162,21 @@ public class SearchServiceV2 {
         }
 
         // 1. 初始化贯穿全局的执行上下文
+        int returnTopK = Math.max(1, topK);
+        int recallTopK = Math.max(returnTopK, config.getRecallTopK());
+        int fusionTopK = Math.max(returnTopK, config.getFusionTopK());
+        int rerankTopK = Math.max(1, config.getRerankTopK());
+        int rerankGlobalMaxChars = Math.max(1, config.getRerankGlobalMaxChars());
+
         SearchContext context = new SearchContext();
         context.setAppCode(appCode);
         context.setQueryText(queryText);
-        context.setTopK(topK);
+        context.setTopK(returnTopK);
+        context.setReturnTopK(returnTopK);
+        context.setRecallTopK(recallTopK);
+        context.setFusionTopK(fusionTopK);
+        context.setRerankTopK(rerankTopK);
+        context.setRerankGlobalMaxChars(rerankGlobalMaxChars);
         context.setFilters(filters);
         context.setTenantPolicy(policy);
         context.setResolvedIndexPattern(searchIndexResolver.resolve(policy, filters));
@@ -179,6 +194,7 @@ public class SearchServiceV2 {
         SearchPipelineStep[] pipeline = needVector
             ? new SearchPipelineStep[]{
                 queryNormalizeStep,
+                literalRecallStep,
                 vectorFetchStep,   // semantic / hybrid 需要向量
                 esRecallStep,
                 rrfFusionStep,
@@ -189,6 +205,7 @@ public class SearchServiceV2 {
             }
             : new SearchPipelineStep[]{
                 queryNormalizeStep,
+                literalRecallStep,
                                    // keyword 模式：跳过 VectorFetchStep
                 esRecallStep,
                 keywordDocumentMatchStep,
@@ -197,8 +214,9 @@ public class SearchServiceV2 {
                 keywordResultAssembleStep
             };
 
-        log.info("[SearchServiceV2] mode={} needVector={} topK={} index={}",
-                context.getSearchMode(), needVector, topK, context.getResolvedIndexPattern());
+        log.info("[SearchServiceV2] mode={} needVector={} returnTopK={} recallTopK={} fusionTopK={} rerankTopK={} index={}",
+                context.getSearchMode(), needVector, context.getReturnTopK(), context.getRecallTopK(),
+                context.getFusionTopK(), context.getRerankTopK(), context.getResolvedIndexPattern());
 
         for (SearchPipelineStep step : pipeline) {
             long stepStart = System.currentTimeMillis();
@@ -210,10 +228,14 @@ public class SearchServiceV2 {
             if (enableAnswerQaRecall && step == vectorFetchStep) {
                 startAnswerQaRecall(context);
             }
+            if (context.getFinalResult() != null) {
+                break;
+            }
         }
         if (enableAnswerQaRecall) {
             collectAnswerQaRecall(context);
         }
+        context.setLlmSemaphoreRejected(aiEngineGateway.wasLlmSemaphoreRejected());
 
         System.out.println("====== [SearchServiceV2 Pipeline End] Total Time: " + (System.currentTimeMillis() - startMs) + " ms ======");
 
@@ -222,7 +244,7 @@ public class SearchServiceV2 {
         //    超管：直接跳过，不强制逐条查 MySQL（避免额外数据库压力）
         //    普通用户：逐条验证，过滤掉因 ES 延迟而混入的"幽灵文档"
         long permissionStart = System.currentTimeMillis();
-        List<Map<String, Object>> finalResult = applyPostPermissionFilter(context.getFinalResult());
+        List<Map<String, Object>> finalResult = applyPostPermissionFilter(context, context.getFinalResult());
         context.getTimings().put("permission_filter_ms", System.currentTimeMillis() - permissionStart);
         context.setFinalResult(finalResult);
 
@@ -234,7 +256,30 @@ public class SearchServiceV2 {
             auditLog.setQueryText(queryText);
             auditLog.setNormalizedQuery(context.getNormalizedQuery());
             auditLog.setTopHitsCount(finalResult != null ? finalResult.size() : 0);
+            auditLog.setEmbeddingCostMs(timingMs(context, "vector_ms"));
+            auditLog.setEsCostMs(timingMs(context, "es_recall_ms"));
+            auditLog.setRerankCostMs(timingMs(context, "rerank_ms"));
             auditLog.setTotalCostMs((int)(System.currentTimeMillis() - startMs));
+            JwtVerifier.UserIdentity identity = UserContextHolder.getIdentity();
+            auditLog.setUserId(identity != null ? identity.getUserId() : null);
+            auditLog.setAdminBypass(identity != null && identity.isSuperAdmin());
+            auditLog.setResolvedIndex(context.getResolvedIndexPattern());
+            auditLog.setSearchMode(context.getSearchMode());
+            auditLog.setReturnTopK(context.getReturnTopK());
+            auditLog.setRecallTopK(context.getRecallTopK());
+            auditLog.setFusionTopK(context.getFusionTopK());
+            auditLog.setRerankTopK(context.getRerankTopK());
+            auditLog.setLiteralHitCount(context.getLiteralHitCount());
+            auditLog.setBm25Hits(context.getBm25Hits());
+            auditLog.setKnnHits(context.getKnnHits());
+            auditLog.setSparseHits(context.getSparseHits());
+            auditLog.setQaHits(context.getQaHitsCount());
+            auditLog.setRrfCandidates(context.getRrfCandidateCount());
+            auditLog.setRerankInputCount(context.getRerankInputCount());
+            auditLog.setRerankDegraded(context.isRerankDegraded());
+            auditLog.setRerankSemaphoreRejected(context.isRerankSemaphoreRejected());
+            auditLog.setLlmSemaphoreRejected(context.isLlmSemaphoreRejected());
+            auditLog.setPostFilterDeniedCount(context.getPostFilterDeniedCount());
             auditLog.setCreateTime(LocalDateTime.now());
             auditLogService.saveAsync(auditLog);
         } catch (Exception e) {
@@ -258,10 +303,10 @@ public class SearchServiceV2 {
                 List<Map<String, Object>> hits;
                 if (denseVector != null && !denseVector.isEmpty()) {
                     hits = aiEngineGateway.fetchQaResults(denseVector, queryText, null,
-                            Math.max(1, Math.min(10, context.getTopK())));
+                            Math.max(1, Math.min(10, context.getReturnTopK())));
                 } else {
                     hits = aiEngineGateway.fetchQaResultsByBm25(queryText, null,
-                            Math.max(1, Math.min(10, context.getTopK())));
+                            Math.max(1, Math.min(10, context.getReturnTopK())));
                 }
                 context.setAnswerQaRecallMs(System.currentTimeMillis() - startMs);
                 context.getTimings().put("answer_qa_recall_ms", context.getAnswerQaRecallMs());
@@ -305,6 +350,7 @@ public class SearchServiceV2 {
     }
 
     private String timingKey(SearchPipelineStep step) {
+        if (step == literalRecallStep) return "literal_recall_ms";
         if (step == vectorFetchStep) return "vector_ms";
         if (step == esRecallStep) return "es_recall_ms";
         if (step == rrfFusionStep) return "rrf_fusion_ms";
@@ -315,6 +361,14 @@ public class SearchServiceV2 {
         if (step == keywordRankStep) return "keyword_rank_ms";
         if (step == keywordResultAssembleStep) return "keyword_result_assemble_ms";
         return step.getClass().getSimpleName() + "_ms";
+    }
+
+    private int timingMs(SearchContext context, String key) {
+        if (context == null || context.getTimings() == null || key == null) {
+            return 0;
+        }
+        Object value = context.getTimings().get(key);
+        return value instanceof Number ? ((Number) value).intValue() : 0;
     }
 
     /**
@@ -335,7 +389,10 @@ public class SearchServiceV2 {
      * @param rawResult Pipeline 输出的原始结果集
      * @return 经权限过滤后的安全结果集
      */
-    private List<Map<String, Object>> applyPostPermissionFilter(List<Map<String, Object>> rawResult) {
+    private List<Map<String, Object>> applyPostPermissionFilter(SearchContext context, List<Map<String, Object>> rawResult) {
+        if (context != null) {
+            context.setPostFilterDeniedCount(0);
+        }
         if (rawResult == null || rawResult.isEmpty()) {
             return rawResult;
         }
@@ -362,6 +419,7 @@ public class SearchServiceV2 {
             String guardKey = (organization != null && !organization.isEmpty()) ? organization : null;
 
             if (guardKey == null) {
+                deniedCount++;
                 // 权限校验缺少文档主键时必须 fail-closed，避免无标识结果越权泄露。
                 deniedCount++;
                 log.warn("[PostPermFilter] organization/file_name 为空，无法校验权限，拒绝返回 doc_id='{}'" , docIdHash);
@@ -383,6 +441,10 @@ public class SearchServiceV2 {
         if (deniedCount > 0) {
             log.warn("[PostPermFilter] ⚠️ 后置过滤拦截了 {} 条文档（ES延迟一致性导致），请排查 acl_tokens 数据质量",
                      deniedCount);
+        }
+
+        if (context != null) {
+            context.setPostFilterDeniedCount(deniedCount);
         }
 
         return safeResult;

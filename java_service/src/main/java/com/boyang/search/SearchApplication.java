@@ -39,6 +39,24 @@ public class SearchApplication {
                     "user_id VARCHAR(64)," +
                     "create_time TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP" +
                     ")");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS resolved_index VARCHAR(255)");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS search_mode VARCHAR(32)");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS return_top_k INT DEFAULT 0");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS recall_top_k INT DEFAULT 0");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS fusion_top_k INT DEFAULT 0");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS rerank_top_k INT DEFAULT 0");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS literal_hit_count INT DEFAULT 0");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS bm25_hits INT DEFAULT 0");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS knn_hits INT DEFAULT 0");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS sparse_hits INT DEFAULT 0");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS qa_hits INT DEFAULT 0");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS rrf_candidates INT DEFAULT 0");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS rerank_input_count INT DEFAULT 0");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS rerank_degraded BOOLEAN DEFAULT false");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS rerank_semaphore_rejected BOOLEAN DEFAULT false");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS llm_semaphore_rejected BOOLEAN DEFAULT false");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS admin_bypass BOOLEAN DEFAULT false");
+            jdbc.execute("ALTER TABLE search_audit_log ADD COLUMN IF NOT EXISTS post_filter_denied_count INT DEFAULT 0");
             
             // 2. 插入测试厂家策略 (boyang-kb)
             // 先删再插保证最新

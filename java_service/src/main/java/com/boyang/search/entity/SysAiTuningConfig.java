@@ -51,6 +51,26 @@ public class SysAiTuningConfig {
     private Integer rrfWindowSize;
 
     /**
+     * ES recall candidate window. This is larger than the API return page size.
+     */
+    private Integer recallTopK;
+
+    /**
+     * RRF fused candidate window passed to downstream expansion/rerank.
+     */
+    private Integer fusionTopK;
+
+    /**
+     * Cross-encoder rerank input window.
+     */
+    private Integer rerankTopK;
+
+    /**
+     * Global character budget for one rerank request.
+     */
+    private Integer rerankGlobalMaxChars;
+
+    /**
      * 是否开启紧急故障熔断：开启后全量请求将跳过 AI 微服务降级为纯文本检索
      */
     private Boolean circuitBreakerEnabled;
@@ -328,5 +348,21 @@ public class SysAiTuningConfig {
      */
     public int getRrfK() {
         return rrfWindowSize != null && rrfWindowSize > 0 ? rrfWindowSize : 60;
+    }
+
+    public int getRecallTopK() {
+        return recallTopK != null && recallTopK > 0 ? recallTopK : 300;
+    }
+
+    public int getFusionTopK() {
+        return fusionTopK != null && fusionTopK > 0 ? fusionTopK : 200;
+    }
+
+    public int getRerankTopK() {
+        return rerankTopK != null && rerankTopK > 0 ? rerankTopK : 50;
+    }
+
+    public int getRerankGlobalMaxChars() {
+        return rerankGlobalMaxChars != null && rerankGlobalMaxChars > 0 ? rerankGlobalMaxChars : 12000;
     }
 }

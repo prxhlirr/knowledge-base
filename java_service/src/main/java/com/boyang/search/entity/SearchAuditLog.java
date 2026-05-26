@@ -48,6 +48,23 @@ public class SearchAuditLog {
     /** 用户ID */
     private String userId;
 
+    private String resolvedIndex;
+    private String searchMode;
+    private Integer returnTopK;
+    private Integer recallTopK;
+    private Integer fusionTopK;
+    private Integer rerankTopK;
+    private Integer literalHitCount;
+    private Integer bm25Hits;
+    private Integer knnHits;
+    private Integer sparseHits;
+    private Integer qaHits;
+    private Integer rrfCandidates;
+    private Integer rerankInputCount;
+    private Boolean rerankDegraded;
+    private Boolean rerankSemaphoreRejected;
+    private Boolean llmSemaphoreRejected;
+
     /**
      * [Phase 2] 超管旁路标志。
      * true  → 本次请求由超管身份触发，后置 PermissionGuard 校验被跳过（属特权访问，已知且合理）
@@ -66,4 +83,3 @@ public class SearchAuditLog {
     /** 记录时间 */
     private LocalDateTime createTime;
 }
-

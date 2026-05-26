@@ -22,6 +22,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * AI 引擎调用防腐层 (Gateway)
@@ -48,6 +51,12 @@ public class AiEngineGateway {
     @Value("${ai.service.ltr-host:http://127.0.0.1:8001}")
     private String ltrHost;
 
+    @Value("${ai.service.llm-max-concurrency:2}")
+    private int llmMaxConcurrency;
+
+    @Value("${ai.service.llm-acquire-timeout-ms:500}")
+    private long llmAcquireTimeoutMs;
+
     private RestTemplate defaultRestTemplate; // 3s/15s
     private RestTemplate fastRestTemplate; // 3s/5s （Rewrite/HyDE 合并专用）
     private RestTemplate llmRestTemplate; // 5s/60s （LLM Rerank 长时调用专用）
@@ -57,6 +66,10 @@ public class AiEngineGateway {
     // 导致每次查询都有 TCP 三次握手开销（20-50ms）+ JVM 分配压力。
     // 与其他4个 RestTemplate 统一在 init() 中初始化，保持一致性。
     private RestTemplate sparseRestTemplate; // 1.5s/1.5s（稀疏向量专用，快速失败降级）
+
+    private Semaphore llmSemaphore;
+    private static final ThreadLocal<Boolean> LLM_SEMAPHORE_REJECTED =
+            ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -121,7 +134,47 @@ public class AiEngineGateway {
         this.sparseRestTemplate = new RestTemplate(sparseFactory);
         this.sparseRestTemplate.getInterceptors().add(traceIdInterceptor);
 
+        this.llmSemaphore = new Semaphore(Math.max(1, llmMaxConcurrency), true);
+
         System.out.println("[Gateway] AI Engine specialized RestTemplates initialized with traceId interceptor.");
+    }
+
+    public void clearLlmSemaphoreRejected() {
+        LLM_SEMAPHORE_REJECTED.set(Boolean.FALSE);
+    }
+
+    public boolean wasLlmSemaphoreRejected() {
+        return Boolean.TRUE.equals(LLM_SEMAPHORE_REJECTED.get());
+    }
+
+    private void markLlmSemaphoreRejected() {
+        LLM_SEMAPHORE_REJECTED.set(Boolean.TRUE);
+    }
+
+    private boolean tryAcquireLlmPermit(String scene) {
+        if (llmSemaphore == null) {
+            return true;
+        }
+        try {
+            boolean acquired = llmSemaphore.tryAcquire(Math.max(0L, llmAcquireTimeoutMs), TimeUnit.MILLISECONDS);
+            if (!acquired) {
+                markLlmSemaphoreRejected();
+                System.err.printf("[Gateway-LLM] busy scene=%s permits=%d timeout=%dms, degrading.%n",
+                        scene, llmMaxConcurrency, llmAcquireTimeoutMs);
+            }
+            return acquired;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            markLlmSemaphoreRejected();
+            System.err.printf("[Gateway-LLM] interrupted scene=%s while waiting for permit.%n", scene);
+            return false;
+        }
+    }
+
+    private void releaseLlmPermit() {
+        if (llmSemaphore != null) {
+            llmSemaphore.release();
+        }
     }
 
     private String getBaseUrl() {
@@ -446,6 +499,9 @@ public class AiEngineGateway {
      * 请求 LLM Reranker (Qwen2.5 等，使用 60s 专属 RestTemplate)
      */
     public List<Double> fetchLlmRerankScores(String query, List<String> documents) {
+        if (!tryAcquireLlmPermit("llm_rerank")) {
+            return null;
+        }
         try {
             Map<String, Object> payload = new HashMap<>();
             payload.put("query", query);
@@ -467,6 +523,8 @@ public class AiEngineGateway {
             }
         } catch (Exception e) {
             System.err.println("[Gateway-LLM] rerank failed: " + e.getMessage());
+        } finally {
+            releaseLlmPermit();
         }
         return null;
     }
@@ -552,6 +610,9 @@ public class AiEngineGateway {
         if (messages == null || messages.isEmpty()) {
             return "";
         }
+        if (!tryAcquireLlmPermit("chat")) {
+            return "";
+        }
         try {
             Map<String, Object> payload = new HashMap<>();
             payload.put("messages", messages);
@@ -572,6 +633,8 @@ public class AiEngineGateway {
             }
         } catch (Exception e) {
             System.err.println("[Gateway-Chat] fetchChatCompletion failed: " + e.getMessage());
+        } finally {
+            releaseLlmPermit();
         }
         return "";
     }
@@ -582,6 +645,11 @@ public class AiEngineGateway {
                                             int maxTokens,
                                             int connectTimeoutMs,
                                             int readTimeoutMs) throws IOException {
+        if (!tryAcquireLlmPermit("chat_stream")) {
+            throw new IOException("AI LLM service is busy; request degraded by Java gateway semaphore.");
+        }
+        boolean releaseOnFailure = true;
+        try {
         Map<String, Object> payload = new HashMap<>();
         payload.put("messages", messages);
         payload.put("model_key", modelKey == null || modelKey.trim().isEmpty() ? "QA_LLM_MODEL" : modelKey);
@@ -614,7 +682,13 @@ public class AiEngineGateway {
             throw new LlmStreamHttpException(statusCode, connectMs, bodyBytes.length, url, errorBody);
         }
         BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
-        return new LlmStreamResponse(conn, reader, connectMs, bodyBytes.length);
+        releaseOnFailure = false;
+        return new LlmStreamResponse(conn, reader, connectMs, bodyBytes.length, this::releaseLlmPermit);
+        } finally {
+            if (releaseOnFailure) {
+                releaseLlmPermit();
+            }
+        }
     }
 
     private String readBody(InputStream stream) {
@@ -638,15 +712,26 @@ public class AiEngineGateway {
         private final BufferedReader reader;
         private final long connectMs;
         private final int requestBytes;
+        private final Runnable closeHook;
+        private final AtomicBoolean closed = new AtomicBoolean(false);
 
         LlmStreamResponse(HttpURLConnection connection,
                           BufferedReader reader,
                           long connectMs,
                           int requestBytes) {
+            this(connection, reader, connectMs, requestBytes, null);
+        }
+
+        LlmStreamResponse(HttpURLConnection connection,
+                          BufferedReader reader,
+                          long connectMs,
+                          int requestBytes,
+                          Runnable closeHook) {
             this.connection = connection;
             this.reader = reader;
             this.connectMs = connectMs;
             this.requestBytes = requestBytes;
+            this.closeHook = closeHook;
         }
 
         public BufferedReader getReader() {
@@ -663,10 +748,19 @@ public class AiEngineGateway {
 
         @Override
         public void close() throws IOException {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
             try {
                 reader.close();
             } finally {
-                connection.disconnect();
+                try {
+                    connection.disconnect();
+                } finally {
+                    if (closeHook != null) {
+                        closeHook.run();
+                    }
+                }
             }
         }
     }

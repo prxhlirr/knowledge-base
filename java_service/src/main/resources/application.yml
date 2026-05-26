@@ -102,6 +102,8 @@ ai:
     colbert-host: ${AI_COLBERT_HOST:${AI_EMBEDDING_HOST:${AI_SERVICE_HOST:http://127.0.0.1:8001}}}
     llm-host: ${AI_LLM_HOST:${AI_SERVICE_HOST:http://127.0.0.1:8001}}
     ltr-host: ${AI_LTR_HOST:${AI_SERVICE_HOST:http://127.0.0.1:8001}}
+    llm-max-concurrency: ${AI_LLM_MAX_CONCURRENCY:2}
+    llm-acquire-timeout-ms: ${AI_LLM_ACQUIRE_TIMEOUT_MS:500}
 
 qa:
   answer:
@@ -139,6 +141,18 @@ editor:
     max-input-chars: ${EDITOR_SIMILARITY_MAX_INPUT_CHARS:4000}
     min-score: ${EDITOR_SIMILARITY_MIN_SCORE:0.55}
     cache-ttl-seconds: ${EDITOR_SIMILARITY_CACHE_TTL_SECONDS:60}
+    meta-index: ${EDITOR_SIMILARITY_META_INDEX:kb_doc_meta_read}
+    meta-write-index: ${EDITOR_SIMILARITY_META_WRITE_INDEX:kb_doc_meta_write}
+    chunk-fallback-index: ${EDITOR_SIMILARITY_CHUNK_FALLBACK_INDEX:kb_document}
+    max-candidates: ${EDITOR_SIMILARITY_MAX_CANDIDATES:20}
+    knn-num-candidates: ${EDITOR_SIMILARITY_KNN_NUM_CANDIDATES:120}
+    rerank-enabled: ${EDITOR_SIMILARITY_RERANK_ENABLED:true}
+    rerank-min-score: ${EDITOR_SIMILARITY_RERANK_MIN_SCORE:0.50}
+    rerank-weight: ${EDITOR_SIMILARITY_RERANK_WEIGHT:0.90}
+    evidence-enabled: ${EDITOR_SIMILARITY_EVIDENCE_ENABLED:true}
+    evidence-fetch-docs: ${EDITOR_SIMILARITY_EVIDENCE_FETCH_DOCS:10}
+    evidence-top-k: ${EDITOR_SIMILARITY_EVIDENCE_TOP_K:2}
+    evidence-max-chars: ${EDITOR_SIMILARITY_EVIDENCE_MAX_CHARS:1200}
 
 # [A-1 修复] CORS 来源白名单，允许本地开发环境及内网域名访问
 # 跨域白名单（多个域名用逗号分隔）

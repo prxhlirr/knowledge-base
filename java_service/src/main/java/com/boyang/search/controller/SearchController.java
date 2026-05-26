@@ -158,7 +158,7 @@ public class SearchController {
                     : 1;
             pageSize = Math.max(1, Math.min(pageSize, 50)); // 每页最大 50
             pageNum = Math.max(1, pageNum);
-            int dynamicTopK = Math.min(pageNum * pageSize, 200);
+            int returnTopK = Math.min(pageNum * pageSize, 200);
             // 检索模式：hybrid（默认）| keyword | semantic。非法值安全降级为 hybrid
             String searchMode = (String) requestBody.getOrDefault("searchMode", "hybrid");
             if (!"keyword".equals(searchMode) && !"semantic".equals(searchMode)) {
@@ -202,9 +202,9 @@ public class SearchController {
             final String userId = (identity != null) ? identity.getUserId() : null;
 
             // ── 5. 缓存命中检查（[P1-8] 缓存全量结果，翻页时直接切片）────
-            // 注意：buildKey 中 topK 参数已设定为 dynamicTopK，避免不同深度的翻页混用
+            // 注意：buildKey 中 topK 参数已设定为 returnTopK，避免不同深度的翻页混用
             // searchMode 必须纳入 key：三种模式召回路径不同，结果集不同，必须各存各的缓存
-            String cacheKey = searchCacheService.buildKey(appCode, queryText, dynamicTopK, filters, finalSearchMode);
+            String cacheKey = searchCacheService.buildKey(appCode, queryText, returnTopK, filters, finalSearchMode);
             List<Map<String, Object>> cached = searchCacheService.get(cacheKey);
             if (cached != null) {
                 long elapsed = System.currentTimeMillis() - startTime;
@@ -238,7 +238,7 @@ public class SearchController {
                         try {
                             // SearchService 已展撤，统一走 SearchServiceV2
                             return searchServiceV2.hybridSearchV2(finalAppCode, finalQueryText,
-                                    dynamicTopK, finalFilters, finalSearchMode);
+                                    returnTopK, finalFilters, finalSearchMode);
                         } catch (Exception e) {
                             throw new RuntimeException(e);
                         } finally {
