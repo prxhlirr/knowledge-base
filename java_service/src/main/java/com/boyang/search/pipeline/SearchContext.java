@@ -104,6 +104,8 @@ public class SearchContext {
     // 5. 中间结果与召回文档
     // ──────────────────────
     private List<Map<String, Object>> fastTrackDocs; // Pre-flight 精确命中短路返回的文档
+    private List<Map<String, Object>> preflightHits; // Exact title/id hits boosted into RRF without short-circuiting
+    private int preflightHitCount;
     private List<Map<String, Object>> candidateDocs; // 各路召回的候选文档集（未精排）
     private List<String> coreTerms;                  // 提取的核心词汇（Boost用）
     /** 关键词模式空格分词后的原始搜索词（由 KeywordRecallStrategy 写入）。

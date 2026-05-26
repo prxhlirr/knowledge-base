@@ -98,28 +98,28 @@ public class HybridRecallStrategy implements RecallStrategy {
             try {
                 SearchResponse<Object> preFlightRes = esClient.search(preFlightReq, Object.class);
                 if (!preFlightRes.hits().hits().isEmpty()) {
-                    System.out.println("[Pre-Flight] MATCHED: Exact Title/ID Short-Circuiting.");
-                    Map<String, Map<String, Object>> ftSourceDeduped = new LinkedHashMap<>();
-                    String highlightSource = (queryText + " " + rewrittenQuery).trim();
+                    Map<String, Map<String, Object>> preflightDeduped = new LinkedHashMap<>();
                     for (co.elastic.clients.elasticsearch.core.search.Hit<Object> hit : preFlightRes.hits().hits()) {
                         Map<String, Object> rawSrc = (Map<String, Object>) hit.source();
                         if (rawSrc == null) continue;
-                        Map<String, Object> meta = (Map<String, Object>) rawSrc.get("metadata");
-                        String sourceName = meta != null ? (String) meta.getOrDefault("source", DEFAULT_ORG) : DEFAULT_ORG;
-                        if (ftSourceDeduped.containsKey(sourceName)) continue;
-                        Map<String, Object> docMap = new HashMap<>();
-                        String rawContent = (String) rawSrc.getOrDefault("content", "");
-                        String snippet = utils.generateFallbackSnippet(rawContent, queryText);
-                        docMap.put("chunk_text",   utils.highlightText(snippet, highlightSource));
-                        docMap.put("organization", sourceName);
-                        docMap.put("publish_time", meta != null ? meta.getOrDefault("publish_time", DEFAULT_DATE) : DEFAULT_DATE);
-                        docMap.put("doc_id",       meta != null ? meta.get("doc_id") : null);
-                        docMap.put("score",        0.95);
-                        docMap.put("_id",          hit.id());
-                        ftSourceDeduped.put(sourceName, docMap);
+                        String hitId = hit.id();
+                        if (hitId == null || preflightDeduped.containsKey(hitId)) continue;
+
+                        Map<String, Object> candidate = new HashMap<>();
+                        double esScore = hit.score() != null ? hit.score() : 50.0;
+                        candidate.put("_id", hitId);
+                        candidate.put("_score", esScore);
+                        candidate.put("_es_score", esScore);
+                        candidate.put("_source", rawSrc);
+                        candidate.put("_preflight_hit", Boolean.TRUE);
+                        candidate.put("_preflight_score", 1.0);
+                        candidate.put("_max_knn_score", 0.0);
+                        preflightDeduped.put(hitId, candidate);
                     }
-                    context.setFastTrackDocs(new ArrayList<>(ftSourceDeduped.values()));
-                    return; // 精确命中，提前退出
+                    context.setPreflightHits(new ArrayList<>(preflightDeduped.values()));
+                    context.setPreflightHitCount(preflightDeduped.size());
+                    System.out.printf("[Pre-Flight] MATCHED: Exact Title/ID boosted into hybrid pipeline (%d hits).%n",
+                            preflightDeduped.size());
                 }
             } catch (Exception e) {
                 System.err.println("[Pre-Flight] probe failed: " + e.getMessage());

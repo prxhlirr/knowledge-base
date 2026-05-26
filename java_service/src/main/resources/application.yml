@@ -232,3 +232,4 @@ logging:
 knowledge:
   base:
     storage-type: minio
+    local-import-mode: ${LOCAL_IMPORT_MODE:minio}

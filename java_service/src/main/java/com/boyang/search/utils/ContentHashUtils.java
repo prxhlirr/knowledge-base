@@ -1,6 +1,8 @@
 package com.boyang.search.utils;
 
 import java.security.MessageDigest;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /**
  * 文件内容 SHA-256 指纹工具类。
@@ -47,6 +49,32 @@ public final class ContentHashUtils {
                 sb.append(String.format("%02x", b));
             }
             return sb.toString();
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+
+    /**
+     * Stream-friendly file hash for local directory imports.
+     * Reads at most the first 8KB to keep the algorithm aligned with compute(byte[]).
+     */
+    public static String compute(Path path) {
+        if (path == null) return "unknown";
+        try (java.io.InputStream is = Files.newInputStream(path)) {
+            byte[] buf = new byte[MAX_HASH_BYTES];
+            int offset = 0;
+            while (offset < MAX_HASH_BYTES) {
+                int read = is.read(buf, offset, MAX_HASH_BYTES - offset);
+                if (read < 0) break;
+                offset += read;
+            }
+            if (offset <= 0) return "unknown";
+            if (offset == buf.length) {
+                return compute(buf);
+            }
+            byte[] actual = new byte[offset];
+            System.arraycopy(buf, 0, actual, 0, offset);
+            return compute(actual);
         } catch (Exception e) {
             return "unknown";
         }

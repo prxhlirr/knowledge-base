@@ -10,11 +10,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -27,6 +26,9 @@ public class LocalIngestStrategy extends AbstractIngestStrategy {
 
     @Value("${doc.upload.max-file-size:104857600}")
     private long maxFileSizeBytes;
+
+    @Value("${knowledge.base.local-import-mode:minio}")
+    private String localImportMode;
 
     @Autowired
     public LocalIngestStrategy(StorageService storageService) {
@@ -44,34 +46,53 @@ public class LocalIngestStrategy extends AbstractIngestStrategy {
         ArrayList<File> files = new ArrayList<>();
 
         if (req.getDirPath() != null && !req.getDirPath().isEmpty()) {
-            this.scanDir(new File(req.getDirPath()), files);
+            scanDir(new File(req.getDirPath()), files);
         } else if (req.getFilePath() != null) {
             files.add(new File(req.getFilePath()));
         }
 
-        log.info("[DocIngest][LOCAL] 扫描完成，准备派发任务 count={}", files.size());
+        log.info("[DocIngest][LOCAL] scan completed, ready to dispatch count={} mode={}",
+                files.size(), localImportMode);
 
         for (File f : files) {
-            if (!f.exists()) {
+            if (!f.exists() || !f.isFile()) {
                 batch.setErrorCount(batch.getErrorCount() + 1);
+                log.warn("[DocIngest][LOCAL] file not found or not regular path={}", f.getAbsolutePath());
                 continue;
             }
-            // [P0 优化] 针对本地导入场景，不再调用 Files.readAllBytes() 读入内存。
-            // 也不再上传到 MinIO (this.storageService.store)。
-            // 而是将磁盘绝对路径直接传给下游 AI 服务进行"直读"。
+            if (f.length() > maxFileSizeBytes) {
+                batch.setErrorCount(batch.getErrorCount() + 1);
+                log.warn("[DocIngest][LOCAL] file exceeds size limit path={} size={}MB",
+                        f.getAbsolutePath(), f.length() / 1024L / 1024L);
+                continue;
+            }
+
             try {
-                // businessName 优先取 req.getFileName()
                 String businessName = (req.getFileName() != null && !req.getFileName().trim().isEmpty())
-                        ? req.getFileName() : f.getName();
-                
-                // 构造任务信息，path 为本地绝对路径
-                Map<String, String> taskInfo = this.buildTaskInfo(f.getAbsolutePath(), businessName, req, "");
-                // 标记为本地直读模式，以便下游 Python 识别
-                taskInfo.put("storageMode", "LOCAL_FS"); 
-                
-                result.add(taskInfo);
+                        ? req.getFileName()
+                        : f.getName();
+
+                if ("direct".equalsIgnoreCase(localImportMode)) {
+                    Map<String, String> taskInfo = buildTaskInfo(f.getAbsolutePath(), businessName, req, "");
+                    taskInfo.put("storageMode", "LOCAL_FS");
+                    taskInfo.put("sourceLocalPath", f.getAbsolutePath());
+                    result.add(taskInfo);
+                    continue;
+                }
+
+                String contentHash = ContentHashUtils.compute(f.toPath());
+                try (InputStream is = Files.newInputStream(f.toPath())) {
+                    String savedPath = storageService.store(is, businessName);
+                    Map<String, String> taskInfo = buildTaskInfo(savedPath, businessName, req, contentHash);
+                    taskInfo.put("storageMode", "MINIO");
+                    taskInfo.put("sourceLocalPath", f.getAbsolutePath());
+                    result.add(taskInfo);
+                    log.info("[DocIngest][LOCAL] uploaded local file sourcePath={} storagePath={}",
+                            f.getAbsolutePath(), savedPath);
+                }
             } catch (Exception e) {
-                log.warn("[DocIngest][LOCAL] 构造任务失败 path={} err={}", f.getAbsolutePath(), e.getMessage());
+                log.warn("[DocIngest][LOCAL] file processing failed path={} err={}",
+                        f.getAbsolutePath(), e.getMessage());
                 batch.setErrorCount(batch.getErrorCount() + 1);
             }
         }
@@ -88,13 +109,17 @@ public class LocalIngestStrategy extends AbstractIngestStrategy {
         }
         for (File f : children) {
             if (f.isDirectory()) {
-                this.scanDir(f, files);
+                scanDir(f, files);
                 continue;
             }
             String name = f.getName().toLowerCase();
-            if (!name.endsWith(".pdf") && !name.endsWith(".doc") && !name.endsWith(".docx") && !name.endsWith(".txt")) continue;
+            if (!name.endsWith(".pdf")
+                    && !name.endsWith(".doc")
+                    && !name.endsWith(".docx")
+                    && !name.endsWith(".txt")) {
+                continue;
+            }
             files.add(f);
         }
     }
-
 }

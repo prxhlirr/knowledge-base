@@ -43,6 +43,7 @@ public class DocIngestService {
     private final ObjectMapper objectMapper;
     private final IngestStrategyFactory ingestStrategyFactory;
     private final DeptTreeService deptTreeService;
+    private final MinioStorageService minioStorageService;
     // [T1-5 Outbox] 写入 outbox 记录 + 发布 AFTER_COMMIT 事件
     private final KbDocOutboxMapper outboxMapper;
     private final ApplicationEventPublisher eventPublisher;
@@ -66,6 +67,7 @@ public class DocIngestService {
             ObjectMapper objectMapper,
             IngestStrategyFactory ingestStrategyFactory,
             DeptTreeService deptTreeService,
+            MinioStorageService minioStorageService,
             KbDocOutboxMapper outboxMapper,
             ApplicationEventPublisher eventPublisher) {
         this.sysDocBatchService = sysDocBatchService;
@@ -75,6 +77,7 @@ public class DocIngestService {
         this.objectMapper = objectMapper;
         this.ingestStrategyFactory = ingestStrategyFactory;
         this.deptTreeService = deptTreeService;
+        this.minioStorageService = minioStorageService;
         this.outboxMapper = outboxMapper;
         this.eventPublisher = eventPublisher;
     }
@@ -153,6 +156,25 @@ public class DocIngestService {
                 && (req.getDeptCode() == null || req.getDeptCode().isEmpty())) {
             throw new IllegalArgumentException("visibility=DEPT 时 deptCode 不能为空");
         }
+    }
+
+    private String resolveWorkerFilePath(String storagePath) {
+        if (storagePath == null || storagePath.trim().isEmpty()) {
+            return storagePath;
+        }
+        if (storagePath.startsWith("http://") || storagePath.startsWith("https://")) {
+            return storagePath;
+        }
+        try {
+            String presignedUrl = minioStorageService.generatePresignedUrl(storagePath);
+            if (presignedUrl != null && !presignedUrl.isEmpty()) {
+                return presignedUrl;
+            }
+        } catch (Exception e) {
+            log.warn("[DocIngest] 生成 Worker 下载 URL 失败，将回退原始路径 storagePath={} err={}",
+                    storagePath, e.getMessage());
+        }
+        return storagePath;
     }
 
     /**
@@ -270,7 +292,12 @@ public class DocIngestService {
                 Map<String, Object> payload = new HashMap<>();
                 payload.put("taskId", taskId);
                 payload.put("fileCode", taskId);
-                payload.put("filePath", info.get("path"));
+                String storagePath = info.get("path");
+                String workerFilePath = resolveWorkerFilePath(storagePath);
+                payload.put("filePath", workerFilePath);
+                payload.put("storagePath", storagePath);
+                payload.put("storageMode", info.getOrDefault("storageMode", "MINIO"));
+                payload.put("sourceLocalPath", info.getOrDefault("sourceLocalPath", ""));
                 payload.put("originalName", info.get("name"));
                 payload.put("visibility", info.getOrDefault("visibility", "INTERNAL"));
                 payload.put("deptCode", info.getOrDefault("deptCode", ""));
@@ -297,7 +324,11 @@ public class DocIngestService {
                 payload.put("acl_tokens_json", this.objectMapper.writeValueAsString(aclTokens));
 
                 String jsonPayload = this.objectMapper.writeValueAsString(payload);
-                long fileSize = new File(info.getOrDefault("path", "")).length();
+                String sizeProbePath = info.getOrDefault("sourceLocalPath", "");
+                if (sizeProbePath == null || sizeProbePath.isEmpty()) {
+                    sizeProbePath = info.getOrDefault("path", "");
+                }
+                long fileSize = new File(sizeProbePath).length();
                 String queueKey = fileSize < QUEUE_SPLIT_BYTES ? QUEUE_HIGH : QUEUE_LOW;
 
                 // ── 写 Outbox 记录（WAITING），与任务记录在同一事务内提交 ──

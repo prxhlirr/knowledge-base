@@ -177,6 +177,7 @@ def main():
             file_path = payload.get("filePath", "")
             file_code = payload.get("fileCode", task_id)
             storage_mode = payload.get("storageMode", "MINIO") 
+            storage_path = payload.get("storagePath", "")
 
             _task_start_time = time.time()
             
@@ -205,6 +206,13 @@ def main():
                 # 根治方案：完全依赖 rag_pipeline 内部的 write-then-expire 机制：
                 #   新版本 bulk 全部写入成功 → update_by_query 标记旧版本 is_latest=False
                 # 任意时刻 ES 中至少有一个 is_latest=True 的版本，文档永不消失。
+
+                if file_path and not file_path.startswith(("http://", "https://")) and not os.path.exists(file_path):
+                    raise FileNotFoundError(
+                        "Worker cannot access filePath. "
+                        f"filePath={file_path}, storagePath={storage_path or '<empty>'}. "
+                        "Use a presigned URL/MinIO path or mount the same LOCAL_FS path into the AI container."
+                    )
 
                 # [Date Fix] 兜底处理前端/Java 侧空时间导致 ES 报错
                 pub_time_raw = payload.get("publishTime")

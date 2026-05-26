@@ -48,6 +48,7 @@ public class RrfFusionStep implements SearchPipelineStep {
         SearchResponse<Object> sparseResp = context.getSparseResponse();
         // [架构重构] 从 SearchContext 读取 QA 第四路召回结果
         List<Map<String, Object>> qaHits = context.getQaHits();
+        List<Map<String, Object>> preflightHits = context.getPreflightHits();
 
         double bm25MaxScore = 0.0;
         if (textResp != null && textResp.hits() != null && !textResp.hits().hits().isEmpty()
@@ -56,7 +57,7 @@ public class RrfFusionStep implements SearchPipelineStep {
         }
 
         List<Map<String, Object>> candidates = rrfMerge(
-            textResp, knnResp, sparseResp, qaHits,
+            textResp, knnResp, sparseResp, qaHits, preflightHits,
             context.getFusionTopK(), context.getTuningConfig(), context.isNavigationalBypass(),
             context.getBm25FlatnessRatio(), context.getBm25TextHits(), context.getQueryIntent(),
             context
@@ -110,6 +111,7 @@ public class RrfFusionStep implements SearchPipelineStep {
             SearchResponse<Object> knnResp,
             SearchResponse<Object> sparseResp,
             List<Map<String, Object>> qaHits,
+            List<Map<String, Object>> preflightHits,
             int topK,
             SysAiTuningConfig config,
             boolean navigational,
@@ -335,6 +337,36 @@ public class RrfFusionStep implements SearchPipelineStep {
             System.out.printf("[RRF] QA channel: %d hits (wQa=%.3f)%n", qaHits.size(), wQa);
         } else {
             System.out.println("[RRF] QA channel: empty (skipped)");
+        }
+
+        // Pre-Flight exact title/id hits are strong evidence, but they must not
+        // short-circuit the hybrid pipeline. Inject them as a boosted RRF
+        // channel so recall, rerank, collapsing, and permission filtering still run.
+        if (preflightHits != null && !preflightHits.isEmpty()) {
+            double wPreflight = Math.max(configBm25, 1.0) * 2.0;
+            int rank = 1;
+            int injected = 0;
+            for (Map<String, Object> hit : preflightHits) {
+                Object idObj = hit.get("_id");
+                if (idObj == null) {
+                    rank++;
+                    continue;
+                }
+                String id = idObj.toString();
+                double score = wPreflight * (1.0 / (k + rank));
+                rrfScores.put(id, rrfScores.getOrDefault(id, 0.0) + score);
+                if (!docRegistry.containsKey(id)) {
+                    docRegistry.put(id, new HashMap<>(hit));
+                } else {
+                    Map<String, Object> existing = docRegistry.get(id);
+                    existing.put("_preflight_hit", Boolean.TRUE);
+                    existing.put("_preflight_score", hit.getOrDefault("_preflight_score", 1.0));
+                }
+                rank++;
+                injected++;
+            }
+            System.out.printf("[RRF] Pre-Flight channel: %d hits injected (wPreflight=%.3f)%n",
+                    injected, wPreflight);
         }
 
         // ── [Phase2 v2] 前言精准降权（替代原 coarse/fine 粒度区分策略）──────────────────
