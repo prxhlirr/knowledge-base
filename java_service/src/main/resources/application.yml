@@ -148,11 +148,17 @@ editor:
     knn-num-candidates: ${EDITOR_SIMILARITY_KNN_NUM_CANDIDATES:120}
     rerank-enabled: ${EDITOR_SIMILARITY_RERANK_ENABLED:true}
     rerank-min-score: ${EDITOR_SIMILARITY_RERANK_MIN_SCORE:0.50}
-    rerank-weight: ${EDITOR_SIMILARITY_RERANK_WEIGHT:0.90}
+    rerank-weight: ${EDITOR_SIMILARITY_RERANK_WEIGHT:0.30}
+    rerank-weight-with-evidence: ${EDITOR_SIMILARITY_RERANK_WEIGHT_WITH_EVIDENCE:0.60}
+    rerank-weight-without-evidence: ${EDITOR_SIMILARITY_RERANK_WEIGHT_WITHOUT_EVIDENCE:0.25}
+    vector-high-confidence-threshold: ${EDITOR_SIMILARITY_VECTOR_HIGH_CONFIDENCE_THRESHOLD:0.85}
+    vector-high-confidence-floor-ratio: ${EDITOR_SIMILARITY_VECTOR_HIGH_CONFIDENCE_FLOOR_RATIO:0.70}
+    conflict-rerank-threshold: ${EDITOR_SIMILARITY_CONFLICT_RERANK_THRESHOLD:0.20}
     evidence-enabled: ${EDITOR_SIMILARITY_EVIDENCE_ENABLED:true}
     evidence-fetch-docs: ${EDITOR_SIMILARITY_EVIDENCE_FETCH_DOCS:10}
     evidence-top-k: ${EDITOR_SIMILARITY_EVIDENCE_TOP_K:2}
     evidence-max-chars: ${EDITOR_SIMILARITY_EVIDENCE_MAX_CHARS:1200}
+    rerank-evidence-max-chars: ${EDITOR_SIMILARITY_RERANK_EVIDENCE_MAX_CHARS:1200}
 
 # [A-1 修复] CORS 来源白名单，允许本地开发环境及内网域名访问
 # 跨域白名单（多个域名用逗号分隔）

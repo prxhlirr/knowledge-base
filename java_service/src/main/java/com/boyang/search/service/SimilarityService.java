@@ -84,8 +84,26 @@ public class SimilarityService {
     @Value("${editor.similarity.rerank-min-score:0.50}")
     private double editorSimilarityRerankMinScore;
 
-    @Value("${editor.similarity.rerank-weight:0.90}")
+    @Value("${editor.similarity.rerank-weight:0.30}")
     private double editorSimilarityRerankWeight;
+
+    @Value("${editor.similarity.rerank-weight-with-evidence:0.60}")
+    private double editorSimilarityRerankWeightWithEvidence;
+
+    @Value("${editor.similarity.rerank-weight-without-evidence:0.25}")
+    private double editorSimilarityRerankWeightWithoutEvidence;
+
+    @Value("${editor.similarity.vector-high-confidence-threshold:0.85}")
+    private double editorSimilarityVectorHighConfidenceThreshold;
+
+    @Value("${editor.similarity.vector-high-confidence-floor-ratio:0.70}")
+    private double editorSimilarityVectorHighConfidenceFloorRatio;
+
+    @Value("${editor.similarity.conflict-rerank-threshold:0.20}")
+    private double editorSimilarityConflictRerankThreshold;
+
+    @Value("${editor.similarity.rerank-evidence-max-chars:1200}")
+    private int editorSimilarityRerankEvidenceMaxChars;
 
     @Value("${editor.similarity.evidence-enabled:true}")
     private boolean editorSimilarityEvidenceEnabled;
@@ -601,7 +619,12 @@ public class SimilarityService {
                 + stringValue(excludeDocId) + "|" + stringValue(excludeSource) + "|"
                 + editorSimilarityEvidenceEnabled + "|" + editorSimilarityEvidenceFetchDocs + "|"
                 + editorSimilarityEvidenceTopK + "|" + editorSimilarityEvidenceMaxChars + "|"
-                + editorSimilarityRerankWeight + "|" + editorSimilarityRerankMinScore + "|" + text;
+                + editorSimilarityRerankEvidenceMaxChars + "|"
+                + editorSimilarityRerankWeight + "|" + editorSimilarityRerankWeightWithEvidence + "|"
+                + editorSimilarityRerankWeightWithoutEvidence + "|" + editorSimilarityRerankMinScore + "|"
+                + editorSimilarityVectorHighConfidenceThreshold + "|"
+                + editorSimilarityVectorHighConfidenceFloorRatio + "|"
+                + editorSimilarityConflictRerankThreshold + "|" + text;
         return "editor:similar:" + stringValue(appCode) + ":" + userId + ":" + sha256(raw);
     }
 
@@ -706,7 +729,14 @@ public class SimilarityService {
         if (values.isEmpty()) {
             values.add(FieldValue.of("_PUBLIC"));
         }
-        b.filter(ft -> ft.terms(t -> t.field(field).terms(tv -> tv.value(values))));
+        if ("acl_tokens".equals(field)) {
+            b.filter(ft -> ft.bool(aclb -> aclb
+                    .should(s -> s.terms(t -> t.field("acl_tokens").terms(tv -> tv.value(values))))
+                    .should(s -> s.terms(t -> t.field("metadata.acl_tokens").terms(tv -> tv.value(values))))
+                    .minimumShouldMatch("1")));
+        } else {
+            b.filter(ft -> ft.terms(t -> t.field(field).terms(tv -> tv.value(values))));
+        }
     }
 
     private SearchResponse<Object> searchEditorSimilarChunks(List<Double> queryVec,
@@ -754,7 +784,7 @@ public class SimilarityService {
                     stringValue(item.get("title")),
                     source,
                     stringValue(item.get("snippet")),
-                    evidence));
+                    abbreviate(evidence, Math.max(300, editorSimilarityRerankEvidenceMaxChars))));
             enriched++;
         }
         return enriched;
@@ -932,11 +962,11 @@ public class SimilarityService {
         List<Double> rerankScores = rerankResult != null ? rerankResult.scores : null;
         List<Double> rawRerankScores = rerankResult != null ? rerankResult.rawScores : null;
         boolean rerankUsed = rerankScores != null;
-        double rerankWeight = clamp01(editorSimilarityRerankWeight);
         double threshold = rerankUsed ? clamp01(editorSimilarityRerankMinScore) : editorSimilarityMinScore;
         List<Map<String, Object>> accepted = new ArrayList<>();
         for (int i = 0; i < candidates.size(); i++) {
             Map<String, Object> item = new LinkedHashMap<>(candidates.get(i));
+            boolean evidenceUsed = Boolean.TRUE.equals(item.get("evidenceUsed"));
             double vectorScore = item.get("vectorScore") instanceof Number
                     ? ((Number) item.get("vectorScore")).doubleValue()
                     : 0.0;
@@ -946,9 +976,20 @@ public class SimilarityService {
             Double rawRerankScore = (rawRerankScores != null && i < rawRerankScores.size())
                     ? rawRerankScores.get(i)
                     : null;
+            double rerankWeight = effectiveRerankWeight(evidenceUsed);
             double businessScore = !rerankUsed
                     ? vectorScore
                     : clamp01(rerankScore * rerankWeight + vectorScore * (1.0 - rerankWeight));
+            boolean scoreConflict = rerankUsed
+                    && vectorScore >= clamp01(editorSimilarityVectorHighConfidenceThreshold)
+                    && rerankScore <= clamp01(editorSimilarityConflictRerankThreshold);
+            double scoreFloor = scoreConflict
+                    ? vectorScore * clamp01(editorSimilarityVectorHighConfidenceFloorRatio)
+                    : 0.0;
+            boolean vectorHighConfidenceProtected = scoreConflict && businessScore < scoreFloor;
+            if (vectorHighConfidenceProtected) {
+                businessScore = clamp01(scoreFloor);
+            }
             if (businessScore < threshold) {
                 continue;
             }
@@ -958,10 +999,10 @@ public class SimilarityService {
             if (rawRerankScore != null) {
                 item.put("rawRerankScore", round4(rawRerankScore));
             }
-            boolean evidenceUsed = Boolean.TRUE.equals(item.get("evidenceUsed"));
             item.put("label", similarityLabel(businessScore));
             item.put("reason", buildRerankReason(rerankResult, rerankScore, rawRerankScore,
-                    vectorScore, rerankWeight, threshold, evidenceUsed));
+                    vectorScore, rerankWeight, threshold, evidenceUsed, scoreConflict,
+                    vectorHighConfidenceProtected, scoreFloor));
             item.put("_rankScore", businessScore);
             item.remove("_rerankText");
             item.remove("_rawScore");
@@ -1053,7 +1094,10 @@ public class SimilarityService {
             double vectorScore,
             double rerankWeight,
             double threshold,
-            boolean evidenceUsed) {
+            boolean evidenceUsed,
+            boolean scoreConflict,
+            boolean vectorHighConfidenceProtected,
+            double scoreFloor) {
         boolean rerankUsed = rerankResult != null;
         Map<String, Object> reason = new LinkedHashMap<>();
         reason.put("rerankUsed", rerankUsed);
@@ -1064,14 +1108,30 @@ public class SimilarityService {
         reason.put("vectorScore", round4(vectorScore));
         reason.put("threshold", round4(threshold));
         reason.put("evidenceUsed", evidenceUsed);
+        reason.put("effectiveRerankWeight", round4(rerankWeight));
+        reason.put("scoreConflict", scoreConflict);
+        reason.put("vectorHighConfidenceProtected", vectorHighConfidenceProtected);
+        if (scoreConflict) {
+            reason.put("scoreFloor", round4(scoreFloor));
+        }
         if (rerankUsed) {
             reason.put("scoreType", rerankResult.scoreType);
             reason.put("rawScoreType", rerankResult.rawScoreType);
             reason.put("rerankWeight", round4(rerankWeight));
         }
-        reason.put("summary", rerankUsed ? "AI reranker judged document-level relevance"
-                : "Reranker unavailable; vector score fallback");
+        reason.put("summary", !rerankUsed
+                ? "Reranker unavailable; vector score fallback"
+                : (scoreConflict
+                        ? "Vector score is high but reranker disagreed; vector protection evaluated"
+                        : "AI reranker judged document-level relevance"));
         return reason;
+    }
+
+    private double effectiveRerankWeight(boolean evidenceUsed) {
+        if (evidenceUsed) {
+            return clamp01(editorSimilarityRerankWeightWithEvidence);
+        }
+        return clamp01(editorSimilarityRerankWeightWithoutEvidence);
     }
 
     private double sigmoid(double score) {

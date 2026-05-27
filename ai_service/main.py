@@ -852,7 +852,11 @@ def health_check():
             "enabled": rerank_enabled,
             "loaded": status.get("reranker_loaded", False),
             "device": status.get("reranker_device", status.get("device", "CPU")),
-            "providers": status.get("reranker_providers", [])
+            "providers": status.get("reranker_providers", []),
+            "max_len": status.get("rerank_max_len"),
+            "model_path": status.get("reranker_model_path", ""),
+            "int8_model_path": status.get("reranker_int8_model_path", ""),
+            "tokenizer_dir": status.get("reranker_tokenizer_dir", "")
         },
         "llm": {
             "enabled": _has_capability("llm"),

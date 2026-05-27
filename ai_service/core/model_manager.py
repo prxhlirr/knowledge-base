@@ -95,8 +95,8 @@ class ModelManager:
             # 修复：chunk 大时自动扩 max_len 至 1024（≈700汉字），覆盖 500 字 coarse chunk 全文。
             _max_chunk = int(os.getenv('MAX_CHUNK_SIZE', '300'))
             cls._instance.max_len = 512 if _max_chunk <= 300 else 1024
-            # Reranker 独立 max_len: 256 足够精排, Attention O(256²) vs O(512²) 快 4x
-            cls._instance.rerank_max_len = 256
+            # Reranker 独立 max_len；文档相似度场景需要更长上下文，离线部署可通过环境变量调优。
+            cls._instance.rerank_max_len = int(os.getenv("RERANK_MAX_LEN", "512"))
             cls._instance.device = "cpu"
             cls._instance.reranker_device = "cpu"
             cls._instance._rerank_cache = {}
@@ -797,7 +797,7 @@ class ModelManager:
         if cache_key in self._rerank_cache: return self._rerank_cache[cache_key]
 
         pairs = [[query, doc] for doc in documents]
-        # 使用独立的 rerank_max_len=256，Attention O(256²) vs O(512²) 快 4x
+        # 使用独立 rerank_max_len，避免文档相似度场景被过短 token 窗口截断。
         _rerank_max = getattr(self, 'rerank_max_len', 256)
         inputs = self.rerank_tokenizer(pairs, padding=True, truncation=True, max_length=_rerank_max, return_tensors="np")
         
@@ -863,6 +863,10 @@ class ModelManager:
             "reranker_device": getattr(self, "reranker_device", "CPU"),
             "providers": self.model.get_providers() if getattr(self, "model", None) else [],
             "reranker_providers": self.reranker.get_providers() if getattr(self, "reranker", None) else [],
+            "rerank_max_len": getattr(self, "rerank_max_len", 256),
+            "reranker_model_path": str(getattr(self, "reranker_path", "")),
+            "reranker_int8_model_path": str(getattr(self, "int8_reranker_path", "")),
+            "reranker_tokenizer_dir": str(getattr(self, "reranker_tokenizer_dir", "")),
             "last_used_at": getattr(self, "last_used_at", 0.0),
             "idle_seconds": self.get_idle_seconds(),
             "idle_unload_enabled": os.getenv("AI_MODEL_IDLE_UNLOAD", "true").lower() == "true",
