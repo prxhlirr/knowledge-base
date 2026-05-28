@@ -229,6 +229,8 @@ def main():
                     "visibility": payload.get("visibility", "INTERNAL"),
                     "dept_code":  payload.get("deptCode", ""),
                     "acl_tokens_json": payload.get("acl_tokens_json", ""),
+                    "grantedUserIds": payload.get("grantedUserIds", []),
+                    "grantedRoles": payload.get("grantedRoles", []),
                     "uploader_id": payload.get("uploaderId", ""),
                     "content_hash": payload.get("contentHash"),
                     "task_id": task_id,

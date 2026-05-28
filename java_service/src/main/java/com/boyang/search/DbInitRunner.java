@@ -196,6 +196,48 @@ public class DbInitRunner implements CommandLineRunner {
             try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_kdg_grantee ON public.kb_doc_grants (grantee_id, is_active)");  } catch (Exception ignore) {}
 
             System.out.println("========== [P0-5 完成] kb_doc_grants 授权明细表已就位 ==========");
+            jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS public.kb_doc_acl_subjects (" +
+                "id             BIGSERIAL      PRIMARY KEY," +
+                "registry_id    BIGINT," +
+                "source_name    VARCHAR(512)   NOT NULL," +
+                "doc_version    INT            NOT NULL DEFAULT 0," +
+                "subject_type   VARCHAR(32)    NOT NULL," +
+                "subject_value  VARCHAR(256)   NOT NULL," +
+                "scope          VARCHAR(32)    NOT NULL DEFAULT 'VIEW'," +
+                "effect         VARCHAR(16)    NOT NULL DEFAULT 'ALLOW'," +
+                "source_type    VARCHAR(32)    NOT NULL DEFAULT 'INGEST_INIT'," +
+                "expires_at     TIMESTAMP," +
+                "is_active      SMALLINT       NOT NULL DEFAULT 1," +
+                "created_by     VARCHAR(64)," +
+                "created_at     TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+                "updated_at     TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP" +
+                ")");
+            try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_kdas_source_scope ON public.kb_doc_acl_subjects (source_name, scope, is_active)"); } catch (Exception ignore) {}
+            try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_kdas_subject ON public.kb_doc_acl_subjects (subject_type, subject_value, is_active)"); } catch (Exception ignore) {}
+            try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_kdas_registry ON public.kb_doc_acl_subjects (registry_id)"); } catch (Exception ignore) {}
+
+            System.out.println("========== [DocACL] kb_doc_acl_subjects ready ==========");
+
+            jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS public.kb_sensitive_policy (" +
+                "id             BIGSERIAL      PRIMARY KEY," +
+                "pattern_type   VARCHAR(32)    NOT NULL DEFAULT 'WORD'," +
+                "pattern_value  VARCHAR(512)   NOT NULL," +
+                "action         VARCHAR(32)    NOT NULL DEFAULT 'MASK'," +
+                "replacement    VARCHAR(128)   DEFAULT '[REDACTED]'," +
+                "applies_to     VARCHAR(32)    NOT NULL DEFAULT 'SEARCH'," +
+                "subject_type   VARCHAR(32)    NOT NULL DEFAULT 'ALL'," +
+                "subject_value  VARCHAR(256)   NOT NULL DEFAULT '*'," +
+                "priority       INT            NOT NULL DEFAULT 100," +
+                "is_active      SMALLINT       NOT NULL DEFAULT 1," +
+                "created_by     VARCHAR(64)," +
+                "approved_by    VARCHAR(64)," +
+                "created_at     TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+                "updated_at     TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP" +
+                ")");
+            try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_ksp_stage_active ON public.kb_sensitive_policy (applies_to, is_active, priority)"); } catch (Exception ignore) {}
+            try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_ksp_subject ON public.kb_sensitive_policy (subject_type, subject_value, is_active)"); } catch (Exception ignore) {}
+
+            System.out.println("========== [SensitivePolicy] kb_sensitive_policy ready ==========");
 
         } catch (Exception e) {
             System.err.println("========== [警告] 动态字典建表失败: " + e.getMessage());

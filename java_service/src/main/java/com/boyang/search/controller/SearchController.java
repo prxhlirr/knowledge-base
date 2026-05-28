@@ -63,6 +63,9 @@ public class SearchController {
     private com.boyang.search.qa.QaClaimVerifier qaClaimVerifier;
     @Autowired
     private PermissionGuard permissionGuard;
+
+    @Autowired
+    private com.boyang.search.service.SensitivePolicyService sensitivePolicyService;
     // 直连 ES，供 chunks 调试接口使用
     @Autowired
     private co.elastic.clients.elasticsearch.ElasticsearchClient esClient;
@@ -433,9 +436,16 @@ public class SearchController {
                 Object chunkIdxVal = (meta != null) ? meta.get("chunk_id") : src.get("chunk_index");
                 chunk.put("chunk_index", chunkIdxVal != null ? chunkIdxVal : 0);
 
-                chunk.put("chunk_text", src.getOrDefault("content", ""));
-                chunk.put("char_count", src.get("content") instanceof String
-                        ? ((String) src.get("content")).length()
+                String chunkText = String.valueOf(src.getOrDefault("content", ""));
+                com.boyang.search.service.SensitivePolicyService.FilterResult filteredChunk =
+                        sensitivePolicyService.filterText(chunkText, "PREVIEW", identity);
+                if (filteredChunk.isBlocked()) {
+                    continue;
+                }
+                chunkText = filteredChunk.getText();
+                chunk.put("chunk_text", chunkText);
+                chunk.put("char_count", chunkText != null
+                        ? chunkText.length()
                         : 0);
                 chunk.put("chunk_gran", src.getOrDefault("chunk_granularity",
                         (meta != null ? meta.getOrDefault("chunk_type", "unknown") : "unknown")));
@@ -889,6 +899,11 @@ public class SearchController {
             }
 
             QaAnswerPlan answerPlan = qaAnswerService.prepareAnswer(appCode, queryText, topK, identity);
+            if (!applySensitivePoliciesToQaPlan(answerPlan)) {
+                response.put("code", 403);
+                response.put("msg", "QA content blocked by sensitive policy");
+                return response;
+            }
             Map<String, Object> data = new LinkedHashMap<>();
             data.put("evidence", answerPlan.getEvidenceSummary());
             data.put("citations", answerPlan.getCitations());
@@ -910,6 +925,14 @@ public class SearchController {
         long streamStartMs = System.currentTimeMillis();
         String modelKey = qaAnswerProperties.getModelKey();
         answerPlan.getEvidenceSummary().put("llm_model_key", modelKey);
+        if (!applySensitivePoliciesToQaPlan(answerPlan)) {
+            answerPlan.getEvidenceSummary().put("sensitive_policy_blocked", true);
+            sendQaEvent(emitter, "evidence", objectMapper.writeValueAsString(answerPlan.getEvidenceSummary()));
+            sendQaEvent(emitter, "citations", objectMapper.writeValueAsString(Collections.emptyList()));
+            sendQaEvent(emitter, "error", "{\"msg\":\"QA content blocked by sensitive policy\"}");
+            sendQaEvent(emitter, "done", "{}");
+            return;
+        }
         sendQaEvent(emitter, "evidence", objectMapper.writeValueAsString(answerPlan.getEvidenceSummary()));
         sendQaEvent(emitter, "citations", objectMapper.writeValueAsString(answerPlan.getCitations()));
         sendQaStageEvent(emitter, "generating");
@@ -957,7 +980,6 @@ public class SearchController {
                             if (firstTokenMs < 0) {
                                 firstTokenMs = System.currentTimeMillis() - streamStartMs;
                             }
-                            sendQaEvent(emitter, "token", objectMapper.writeValueAsString(retryAnswer));
                             answerSource = "non_stream_retry";
                             answerPlan.getEvidenceSummary().put("llm_stream_empty_retry", true);
                         }
@@ -970,7 +992,6 @@ public class SearchController {
                             if (firstTokenMs < 0) {
                                 firstTokenMs = System.currentTimeMillis() - streamStartMs;
                             }
-                            sendQaEvent(emitter, "token", objectMapper.writeValueAsString(fallbackAnswer));
                             answerSource = "extractive_fallback";
                             answerPlan.getEvidenceSummary().put("llm_empty_answer_fallback", true);
                         }
@@ -984,11 +1005,12 @@ public class SearchController {
                             answerPlan.getEvidenceSummary().put("llm_invalid_answer_fallback", true);
                         }
                     }
+                    finalAnswer = applySensitivePoliciesToQaAnswer(finalAnswer, answerPlan);
                     List<Map<String, Object>> answerParts = buildAnswerParts(finalAnswer, answerPlan);
                     String plainAnswer = plainTextFromAnswerParts(answerParts);
                     answerBuffer.setLength(0);
                     answerBuffer.append(plainAnswer);
-                    if (!plainAnswer.isEmpty() && !streamedAnyToken && "stream".equals(answerSource)) {
+                    if (!plainAnswer.isEmpty()) {
                         sendQaEvent(emitter, "token", objectMapper.writeValueAsString(plainAnswer));
                     }
                     sendQaEvent(emitter, "answer_parts", objectMapper.writeValueAsString(answerParts));
@@ -1018,7 +1040,6 @@ public class SearchController {
                 tokenEvents++;
                 appendToken(answerBuffer, data);
                 streamedAnyToken = true;
-                sendQaEvent(emitter, "token", data);
             }
         }
         System.out.printf("[QA Stream] model_key=%s connect=%dms first_token=%dms tokens=%d total=%dms%n",
@@ -1058,6 +1079,7 @@ public class SearchController {
             sendQaEvent(emitter, "done", "{}");
             return;
         }
+        fallbackAnswer = applySensitivePoliciesToQaAnswer(fallbackAnswer, answerPlan);
         List<Map<String, Object>> answerParts = buildAnswerParts(fallbackAnswer, answerPlan);
         String plainAnswer = plainTextFromAnswerParts(answerParts);
         answerPlan.getEvidenceSummary().put("llm_error", sanitizeLlmError(rawError));
@@ -1285,6 +1307,116 @@ public class SearchController {
             }
         }
         return plain.toString().trim();
+    }
+
+    private boolean applySensitivePoliciesToQaPlan(QaAnswerPlan answerPlan) {
+        if (answerPlan == null) {
+            return true;
+        }
+        com.boyang.search.security.JwtVerifier.UserIdentity identity =
+                com.boyang.search.security.UserContextHolder.getIdentity();
+
+        if (!filterSensitiveMapRecursive(answerPlan.getEvidenceSummary(), "QA", identity)) {
+            answerPlan.getEvidenceSummary().put("sensitive_policy_blocked", true);
+            return false;
+        }
+
+        Iterator<Map<String, Object>> citationIterator = answerPlan.getCitations().iterator();
+        while (citationIterator.hasNext()) {
+            Map<String, Object> citation = citationIterator.next();
+            if (!filterSensitiveMapRecursive(citation, "QA", identity)) {
+                citationIterator.remove();
+                answerPlan.getEvidenceSummary().put("sensitive_policy_citation_removed", true);
+            }
+        }
+
+        for (Map<String, String> message : answerPlan.getMessages()) {
+            if (message == null) {
+                continue;
+            }
+            String content = message.get("content");
+            if (content == null || content.isEmpty()) {
+                continue;
+            }
+            com.boyang.search.service.SensitivePolicyService.FilterResult filtered =
+                    sensitivePolicyService.filterText(content, "QA", identity);
+            if (filtered.isBlocked()) {
+                answerPlan.getEvidenceSummary().put("sensitive_policy_prompt_blocked", true);
+                return false;
+            }
+            if (filtered.isChanged()) {
+                message.put("content", filtered.getText());
+                answerPlan.getEvidenceSummary().put("sensitive_policy_prompt_masked", true);
+            }
+        }
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean filterSensitiveMapRecursive(Map<String, Object> map,
+            String appliesTo,
+            com.boyang.search.security.JwtVerifier.UserIdentity identity) {
+        if (map == null) {
+            return true;
+        }
+        boolean changed = false;
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+            Object value = entry.getValue();
+            if (value instanceof String) {
+                com.boyang.search.service.SensitivePolicyService.FilterResult filtered =
+                        sensitivePolicyService.filterText((String) value, appliesTo, identity);
+                if (filtered.isBlocked()) {
+                    return false;
+                }
+                if (filtered.isChanged()) {
+                    entry.setValue(filtered.getText());
+                    changed = true;
+                }
+            } else if (value instanceof Map) {
+                if (!filterSensitiveMapRecursive((Map<String, Object>) value, appliesTo, identity)) {
+                    return false;
+                }
+            } else if (value instanceof List) {
+                List<?> values = (List<?>) value;
+                Iterator<?> iterator = values.iterator();
+                while (iterator.hasNext()) {
+                    Object item = iterator.next();
+                    if (item instanceof Map) {
+                        if (!filterSensitiveMapRecursive((Map<String, Object>) item, appliesTo, identity)) {
+                            iterator.remove();
+                            changed = true;
+                        }
+                    } else if (item instanceof String) {
+                        com.boyang.search.service.SensitivePolicyService.FilterResult filtered =
+                                sensitivePolicyService.filterText((String) item, appliesTo, identity);
+                        if (filtered.isBlocked()) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        if (changed) {
+            map.put("sensitiveFiltered", true);
+        }
+        return true;
+    }
+
+    private String applySensitivePoliciesToQaAnswer(String answer, QaAnswerPlan answerPlan) {
+        com.boyang.search.security.JwtVerifier.UserIdentity identity =
+                com.boyang.search.security.UserContextHolder.getIdentity();
+        com.boyang.search.service.SensitivePolicyService.FilterResult filtered =
+                sensitivePolicyService.filterText(answer, "QA", identity);
+        if (filtered.isBlocked()) {
+            if (answerPlan != null) {
+                answerPlan.getEvidenceSummary().put("sensitive_policy_answer_blocked", true);
+            }
+            return "The answer is blocked by sensitive content policy.";
+        }
+        if (filtered.isChanged() && answerPlan != null) {
+            answerPlan.getEvidenceSummary().put("sensitive_policy_answer_masked", true);
+        }
+        return filtered.getText();
     }
 
     private void sendQaEvent(org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter,

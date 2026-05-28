@@ -322,6 +322,8 @@ public class DocIngestService {
                 List<String> aclTokens = computeAclTokens(
                         visibility, deptCode, uploaderId, grantedUsers, grantedRoles);
                 payload.put("acl_tokens_json", this.objectMapper.writeValueAsString(aclTokens));
+                payload.put("grantedUserIds", grantedUsers);
+                payload.put("grantedRoles", grantedRoles);
 
                 String jsonPayload = this.objectMapper.writeValueAsString(payload);
                 String sizeProbePath = info.getOrDefault("sourceLocalPath", "");

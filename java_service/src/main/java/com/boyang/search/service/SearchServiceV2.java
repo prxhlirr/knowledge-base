@@ -94,6 +94,9 @@ public class SearchServiceV2 {
     @Autowired
     private PermissionGuard permissionGuard;
 
+    @Autowired
+    private SensitivePolicyService sensitivePolicyService;
+
     // [P1-1 补充] 审计日志服务：对齐 V1 recordAuditLog，记录每次搜索的耐时、hits 数等性能指标
     @Autowired
     private SearchAuditLogService auditLogService;
@@ -183,6 +186,11 @@ public class SearchServiceV2 {
         context.setTuningConfig(config);
         context.setStartTime(startMs);
         context.setEvidencePrefetchEnabled(enableAnswerQaRecall);
+        if ("__no_readable_index__".equals(context.getResolvedIndexPattern())) {
+            context.setFinalResult(Collections.emptyList());
+            context.getTimings().put("index_acl_denied", 1);
+            return context;
+        }
         // 写入 searchMode（null 安全：保底为 hybrid，确保向后兼容）
         context.setSearchMode(searchMode != null && !searchMode.isEmpty() ? searchMode : "hybrid");
 
@@ -245,6 +253,7 @@ public class SearchServiceV2 {
         //    普通用户：逐条验证，过滤掉因 ES 延迟而混入的"幽灵文档"
         long permissionStart = System.currentTimeMillis();
         List<Map<String, Object>> finalResult = applyPostPermissionFilter(context, context.getFinalResult());
+        finalResult = applySensitivePolicyFilter(context, finalResult);
         context.getTimings().put("permission_filter_ms", System.currentTimeMillis() - permissionStart);
         context.setFinalResult(finalResult);
 
@@ -447,6 +456,35 @@ public class SearchServiceV2 {
             context.setPostFilterDeniedCount(deniedCount);
         }
 
+        return safeResult;
+    }
+
+    private List<Map<String, Object>> applySensitivePolicyFilter(SearchContext context, List<Map<String, Object>> rawResult) {
+        if (rawResult == null || rawResult.isEmpty()) {
+            return rawResult;
+        }
+        JwtVerifier.UserIdentity identity = UserContextHolder.getIdentity();
+        List<Map<String, Object>> safeResult = new ArrayList<>();
+        int blockedCount = 0;
+        int maskedCount = 0;
+        for (Map<String, Object> item : rawResult) {
+            boolean allowed = sensitivePolicyService.filterResultMap(item, "SEARCH", identity);
+            if (allowed) {
+                if (Boolean.TRUE.equals(item.get("sensitiveFiltered"))) {
+                    maskedCount++;
+                }
+                safeResult.add(item);
+            } else {
+                blockedCount++;
+            }
+        }
+        if (blockedCount > 0 || maskedCount > 0) {
+            log.warn("[SensitivePolicy] search results filtered masked={} blocked={}", maskedCount, blockedCount);
+        }
+        if (context != null) {
+            context.getTimings().put("sensitive_filter_blocked", blockedCount);
+            context.getTimings().put("sensitive_filter_masked", maskedCount);
+        }
         return safeResult;
     }
 }

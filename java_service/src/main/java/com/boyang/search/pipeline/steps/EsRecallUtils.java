@@ -74,9 +74,14 @@ public class EsRecallUtils {
             mixedBool.should(s -> s.terms(t -> t.field("acl_tokens")
                 .terms(tv -> tv.value(tokenValues))));
 
-            // 分支B：旧架构降级 —— 文档不存在 acl_tokens 字段（存量历史数据）
+            // 兼容当前主 chunk 曾写入 metadata.acl_tokens 的存量数据。
+            mixedBool.should(s -> s.terms(t -> t.field("metadata.acl_tokens")
+                .terms(tv -> tv.value(tokenValues))));
+
+            // 分支B：旧架构降级 —— 文档不存在任何 acl_tokens 字段（存量历史数据）
             mixedBool.should(s -> s.bool(legacyBool -> {
                 legacyBool.mustNot(mn -> mn.exists(e -> e.field("acl_tokens")));
+                legacyBool.mustNot(mn -> mn.exists(e -> e.field("metadata.acl_tokens")));
                 legacyBool.must(m -> m.bool(permBool -> {
                     if (isAnonymous) {
                         permBool.should(sh -> sh.term(t -> t.field("metadata.visibility").value("PUBLIC")));

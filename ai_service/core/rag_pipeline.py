@@ -1351,6 +1351,7 @@ class RAGPipeline:
                     "chunk_granularity": granularity,
                     "parent_chunk_id":  parent_chunk_id,
                     "keywords":         chunk_keywords,   # [P1-3A] chunk 级独立关键词
+                    "acl_tokens":       acl_tokens,
                     "metadata": {
                         "source":           source_name,
                         "title":            doc_title,   # [标题检索修复] 文档标题，独立 text 字段支持分词检索
@@ -1576,6 +1577,8 @@ class RAGPipeline:
                     "publishTime":  ext_metadata.get("publishTime")  if ext_metadata else None,
                     "visibility":   visibility,
                     "deptCode":     ext_metadata.get("dept_code")    if ext_metadata else None,
+                    "grantedUserIds": ext_metadata.get("grantedUserIds", []) if ext_metadata else [],
+                    "grantedRoles":  ext_metadata.get("grantedRoles", []) if ext_metadata else [],
                     "uploaderId":   uploader_id,
                     "uploaderName": ext_metadata.get("owner")        if ext_metadata else None,
                     "parseStatus":  parse_status,

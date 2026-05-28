@@ -34,6 +34,8 @@ public class DocRegisterController {
     private final KbDocOutboxMapper outboxMapper;
     /** [Fix] Python 回调同步充填 kb_doc_register 字段，将占位草稿从 PROCESSING 推进到 INDEXED */
     private final com.boyang.search.service.KbDocRegistryService kbDocRegistryService;
+    private final com.boyang.search.service.IndexAliasResolver indexAliasResolver;
+    private final com.boyang.search.service.KbDocAclSubjectService aclSubjectService;
 
     /**
      * 单文件/目录注册接口（供外部系统主动推送）。
@@ -237,13 +239,19 @@ public class DocRegisterController {
             //         则 0 条命中，is_latest 永远停留在 false。
             //   修复：Python 回调已携带实际写入的 targetIndex，此处用它覆盖 Java 预置值。
             String actualTargetIndex = (String) body.get("targetIndex");
+            String normalizedActualTargetIndex = null;
+            if (actualTargetIndex != null && !actualTargetIndex.trim().isEmpty()) {
+                normalizedActualTargetIndex = indexAliasResolver.normalizeWriteTarget(actualTargetIndex);
+            }
 
             // [Fix] 回调同时充填 kb_doc_register：将占位草稿（PROCESSING + 字段为空）推进到 INDEXED
             // 根因：getNextVersion() 创建了占位记录但字段全为 NULL，必须在此处回填完整免数据。
             // Outbox 模式下此处只登记 MySQL，ES 激活统一交给 OutboxPoller。
             try {
                 String storagePath   = (String) body.getOrDefault("storagePath", "");
-                String targetIndex   = (String) body.getOrDefault("targetIndex", "kb_document_v1");
+                String targetIndex   = normalizedActualTargetIndex != null
+                                      ? normalizedActualTargetIndex
+                                      : indexAliasResolver.normalizeWriteTarget((String) body.getOrDefault("targetIndex", "kb_document_v1"));
                 int    chunkCount    = body.get("chunkCount") instanceof Number
                                       ? ((Number) body.get("chunkCount")).intValue() : 0;
                 String contentHash   = (String) body.getOrDefault("contentHash", "");
@@ -258,7 +266,7 @@ public class DocRegisterController {
                 String docId         = (String) body.getOrDefault("docId", sourceName + ":" + docVersion);
                 String parseStatus   = (String) body.getOrDefault("parseStatus", "INDEXED");
 
-                kbDocRegistryService.registerDoc(
+                com.boyang.search.entity.KbDocRegistry registeredDoc = kbDocRegistryService.registerDoc(
                     sourceName, docVersion, docId,
                     storagePath, targetIndex, chunkCount,
                     contentHash, docNumber, unit,
@@ -266,6 +274,12 @@ public class DocRegisterController {
                     deptCode, uploaderId, uploaderName,
                     parseStatus,
                     false
+                );
+                aclSubjectService.replaceInitialSubjects(
+                    registeredDoc,
+                    stringList(body.get("grantedUserIds")),
+                    stringList(body.get("grantedRoles")),
+                    uploaderId
                 );
                 log.info("[DocRegistry] kb_doc_register 已充填 taskId={} sourceName={} v{} status={}",
                     taskId, sourceName, docVersion, parseStatus);
@@ -281,14 +295,14 @@ public class DocRegisterController {
             update.setFileBaseHash(fileBaseHash);
             update.setStatus("READY");
             // 用 Python 实际写入索引覆盖预置值（null 时保留原值，兼容旧版 Python 不传此字段的情况）
-            if (actualTargetIndex != null && !actualTargetIndex.trim().isEmpty()) {
-                update.setTargetIndex(actualTargetIndex);
+            if (normalizedActualTargetIndex != null && !normalizedActualTargetIndex.trim().isEmpty()) {
+                update.setTargetIndex(normalizedActualTargetIndex);
             }
             outboxMapper.updateById(update);
 
             log.info("[DocRegistry] outbox WAITING→READY taskId={} sourceName={} v{} hash={} targetIndex={}",
                 taskId, sourceName, docVersion, fileBaseHash,
-                actualTargetIndex != null ? actualTargetIndex : record.getTargetIndex());
+                normalizedActualTargetIndex != null ? normalizedActualTargetIndex : record.getTargetIndex());
 
             resp.put("code", 200);
             resp.put("msg",  "OK");
@@ -299,5 +313,29 @@ public class DocRegisterController {
         }
         return resp;
     }
-}
 
+    private java.util.List<String> stringList(Object raw) {
+        java.util.List<String> result = new java.util.ArrayList<>();
+        if (raw == null) {
+            return result;
+        }
+        if (raw instanceof java.util.Collection) {
+            for (Object item : (java.util.Collection<?>) raw) {
+                if (item != null && !item.toString().trim().isEmpty()) {
+                    result.add(item.toString().trim());
+                }
+            }
+            return result;
+        }
+        String text = raw.toString().trim();
+        if (text.isEmpty()) {
+            return result;
+        }
+        for (String part : text.split(",")) {
+            if (!part.trim().isEmpty()) {
+                result.add(part.trim());
+            }
+        }
+        return result;
+    }
+}

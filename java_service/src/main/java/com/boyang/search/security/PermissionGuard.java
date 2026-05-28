@@ -1,6 +1,7 @@
 package com.boyang.search.security;
 
 import com.boyang.search.entity.KbDocRegistry;
+import com.boyang.search.service.KbDocAclSubjectService;
 import com.boyang.search.service.KbDocGrantsService;
 import com.boyang.search.service.KbDocRegistryService;
 import lombok.RequiredArgsConstructor;
@@ -50,6 +51,7 @@ public class PermissionGuard {
      * 替代原来依赖 ES granted_users 字段的不可靠方案。
      */
     private final KbDocGrantsService grantsService;
+    private final KbDocAclSubjectService aclSubjectService;
 
     /**
      * 部门树服务（替代原来的简单前缀匹配，支持组织层级权限推导）。
@@ -103,8 +105,19 @@ public class PermissionGuard {
                      docSourceName, identity.getUserId());
             return AccessResult.allowAsAdmin();
         }
-        // 普通用户：从 MySQL 读取稳定权限元数据（不依赖 ES 延迟刷新数据）
-        return canAccess(docSourceName, identity.getUserId(), identity.getDeptCode());
+        KbDocRegistry doc = registryService.findLatest(docSourceName);
+        if (doc == null || "DELETED".equals(doc.getStatus())) {
+            return AccessResult.deny("文档不存在或已删除");
+        }
+        KbDocAclSubjectService.Decision decision = aclSubjectService.decide(doc, identity, "VIEW");
+        if (decision == KbDocAclSubjectService.Decision.DENY) {
+            return AccessResult.deny("文档 ACL 策略拒绝访问");
+        }
+        if (decision == KbDocAclSubjectService.Decision.ALLOW) {
+            return AccessResult.allow();
+        }
+        // 兼容旧版 visibility 权限模型。
+        return canAccess(doc, identity.getUserId(), identity.getDeptCode());
     }
 
     /**

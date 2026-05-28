@@ -1,9 +1,11 @@
 package com.boyang.search.service;
 
 import com.boyang.search.entity.KbDocGrants;
+import com.boyang.search.entity.KbDocRegistry;
 import com.boyang.search.mapper.KbDocGrantsMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,6 +30,12 @@ import java.util.List;
 public class KbDocGrantsService {
 
     private final KbDocGrantsMapper grantsMapper;
+    private final StringRedisTemplate redisTemplate;
+    private final KbDocAclSubjectService aclSubjectService;
+    private final KbDocRegistryService registryService;
+    private final DocAclProjectionService aclProjectionService;
+
+    private static final String CACHE_GRANTS_PREFIX = "acl:grants:user:";
 
     /**
      * 向指定用户授予文档访问权（P0-5 核心方法）。
@@ -67,6 +75,9 @@ public class KbDocGrantsService {
         grant.setUpdatedAt(LocalDateTime.now());
 
         grantsMapper.insert(grant);
+        aclSubjectService.grantRuntimeUser(registryId, sourceName, granteeId, grantedBy, expiresAt);
+        projectRuntimeUserToken(registryId, sourceName, granteeId, true);
+        evictGrantCache(granteeId);
         log.info("[DocGrant][AUDIT] 授权成功 sourceName='{}' granteeId='{}' grantedBy='{}' expiresAt={}",
                  sourceName, granteeId, grantedBy, expiresAt != null ? expiresAt : "永久");
         return grant;
@@ -85,6 +96,9 @@ public class KbDocGrantsService {
     public boolean revokeAccess(String sourceName, String granteeId, String operatorId) {
         int affected = grantsMapper.revokeGrant(sourceName, granteeId);
         if (affected > 0) {
+            aclSubjectService.revokeRuntimeUser(sourceName, granteeId);
+            projectRuntimeUserToken(null, sourceName, granteeId, false);
+            evictGrantCache(granteeId);
             log.info("[DocGrant][AUDIT] 撤销授权 sourceName='{}' granteeId='{}' operatorId='{}'",
                      sourceName, granteeId, operatorId);
             return true;
@@ -149,5 +163,29 @@ public class KbDocGrantsService {
         }
         return grantsMapper.findGrantedSourceNamesByUser(userId);
     }
-}
 
+    private void evictGrantCache(String userId) {
+        if (userId == null || userId.trim().isEmpty()) {
+            return;
+        }
+        try {
+            redisTemplate.delete(CACHE_GRANTS_PREFIX + userId);
+        } catch (Exception e) {
+            log.warn("[DocGrant] Redis GRANT cache eviction failed userId={} err={}", userId, e.getMessage());
+        }
+    }
+
+    private void projectRuntimeUserToken(Long registryId, String sourceName, String userId, boolean grant) {
+        KbDocRegistry doc = registryId != null ? registryService.getById(registryId) : registryService.findLatest(sourceName);
+        if (doc == null) {
+            log.warn("[DocGrant] skip ACL token projection, registry not found sourceName={} registryId={}", sourceName, registryId);
+            return;
+        }
+        String token = "user::" + userId;
+        if (grant) {
+            aclProjectionService.grantToken(doc.getTargetIndex(), sourceName, token);
+        } else {
+            aclProjectionService.revokeToken(doc.getTargetIndex(), sourceName, token);
+        }
+    }
+}

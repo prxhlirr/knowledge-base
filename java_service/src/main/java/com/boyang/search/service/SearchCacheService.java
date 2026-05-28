@@ -36,6 +36,7 @@ public class SearchCacheService {
 
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
+    private final PolicyVersionService policyVersionService;
 
     /** 缓存 TTL（秒），可在 application.yml 中通过 doc.search.cache-ttl 覆盖 */
     private static final long CACHE_TTL_SECONDS = 300L;
@@ -61,12 +62,13 @@ public class SearchCacheService {
         String deptCode    = filters != null ? String.valueOf(filters.getOrDefault("user_dept_code", "")) : "";
         String userId      = filters != null ? String.valueOf(filters.getOrDefault("user_id", "")) : "";
         String mode        = searchMode != null ? searchMode : "hybrid";
+        String policyVersion = policyVersionService.currentGlobalVersion();
         Set<String> aclTokenSet = new TreeSet<>(UserContextHolder.getAclTokens());
         String aclDigest = sha256Hex(String.join(",", aclTokenSet));
         String raw = appCode + "|" + queryText + "|" + topK + "|" + dataSource + "|" + deptCode
-                + "|" + userId + "|" + aclDigest + "|" + mode;
+                + "|" + userId + "|" + aclDigest + "|" + mode + "|" + policyVersion;
         String hash = sha256Hex(raw);
-        return KEY_PREFIX + appCode + ":" + hash;
+        return KEY_PREFIX + appCode + ":v" + policyVersion + ":" + hash;
     }
 
     /**

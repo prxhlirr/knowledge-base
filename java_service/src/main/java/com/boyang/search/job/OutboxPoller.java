@@ -46,6 +46,7 @@ public class OutboxPoller {
     private final KbDocOutboxMapper outboxMapper;
     /** 使用项目统一注入的 ES 8.x Java Client（co.elastic.clients） */
     private final ElasticsearchClient esClient;
+    private final com.boyang.search.service.IndexAliasResolver indexAliasResolver;
 
     /** 是否启用 Outbox Poller（开发环境可关闭） */
     @Value("${outbox.poller.enabled:true}")
@@ -110,7 +111,8 @@ public class OutboxPoller {
     private void activateInEs(KbDocOutbox outbox) throws Exception {
         String sourceName  = outbox.getSourceName();
         int    docVersion  = outbox.getDocVersion() != null ? outbox.getDocVersion() : 1;
-        String targetIndex = outbox.getTargetIndex() != null ? outbox.getTargetIndex() : "kb_document_v1";
+        String targetIndex = indexAliasResolver.normalizeWriteTarget(
+            outbox.getTargetIndex() != null ? outbox.getTargetIndex() : "kb_document_v1");
 
         // 单次脚本切换：同一 source_name 下，新版本设为 true，其余版本设为 false。
         UpdateByQueryRequest switchLatest = new UpdateByQueryRequest.Builder()
