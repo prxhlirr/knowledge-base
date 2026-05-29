@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>电子凭证二维码生成中心</title>
+    <!-- 引入 Outfit 现代无衬线字体，提升 UI 科技感 -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Noto+Sans+SC:wght@300;400;700&display=swap"
+        rel="stylesheet">
+
+    <style>
+        :root {
+            --bg-color: #080c14;
+            --card-bg: rgba(16, 22, 38, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --primary-grad: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+            --primary-glow: rgba(99, 102, 241, 0.3);
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --accent-green: #10b981;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', 'Noto Sans SC', sans-serif;
+            background-color: var(--bg-color);
+            background-image:
+                radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.15) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(168, 85, 247, 0.12) 0px, transparent 50%);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            overflow-x: hidden;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 960px;
+            background: var(--card-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border-color);
+            border-radius: 24px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            transition: transform 0.3s ease;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 35px;
+        }
+
+        .header h1 {
+            font-size: 2.2rem;
+            font-weight: 800;
+            background: var(--primary-grad);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+            letter-spacing: 1px;
+        }
+
+        .header p {
+            color: var(--text-muted);
+            font-size: 1rem;
+        }
+
+        .grid-layout {
+            display: grid;
+            grid-template-columns: 1.2fr 1fr;
+            gap: 40px;
+        }
+
+        @media (max-width: 768px) {
+            .grid-layout {
+                grid-template-columns: 1fr;
+            }
+
+            .container {
+                padding: 24px;
+            }
+        }
+
+        /* 表单区域样式 */
+        .form-section {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .input-group label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .input-control {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 14px 16px;
+            font-size: 0.95rem;
+            color: var(--text-main);
+            transition: all 0.3s ease;
+        }
+
+        .input-control:focus {
+            outline: none;
+            border-color: #6366f1;
+            box-shadow: 0 0 12px var(--primary-glow);
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        .btn-generate {
+            background: var(--primary-grad);
+            border: none;
+            border-radius: 12px;
+            padding: 16px;
+            font-size: 1rem;
+            font-weight: 600;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+            margin-top: 10px;
+        }
+
+        .btn-generate:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6);
+        }
+
+        .btn-generate:active {
+            transform: translateY(1px);
+        }
+
+        /* 展示及二维码区域样式 */
+        .display-section {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px dashed rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            position: relative;
+        }
+
+        .qr-wrapper {
+            position: relative;
+            background: white;
+            border-radius: 16px;
+            padding: 16px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+            display: inline-block;
+            transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        .qr-wrapper:hover {
+            transform: scale(1.03);
+        }
+
+        /* 物理刻度尺标（体现不小于2cm的设计要求） */
+        .ruler-guide {
+            display: flex;
+            width: 260px;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 12px;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+        }
+
+        .ruler-line {
+            flex-grow: 1;
+            height: 1px;
+            background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.25) 20%, rgba(255, 255, 255, 0.25) 80%, transparent);
+            margin: 0 8px;
+            position: relative;
+        }
+
+        .ruler-line::before,
+        .ruler-line::after {
+            content: '';
+            position: absolute;
+            top: -3px;
+            width: 1px;
+            height: 7px;
+            background: rgba(255, 255, 255, 0.4);
+        }
+
+        .ruler-line::before {
+            left: 20%;
+        }
+
+        .ruler-line::after {
+            right: 20%;
+        }
+
+        #qrcode-canvas {
+            display: block;
+            width: 228px;
+            /* 物理展示尺寸限定 */
+            height: 228px;
+            border-radius: 8px;
+        }
+
+        /* Base64 密文展示区 */
+        .b64-container {
+            margin-top: 25px;
+            width: 100%;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 12px;
+            padding: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            position: relative;
+        }
+
+        .b64-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+
+        .btn-copy {
+            background: transparent;
+            border: none;
+            color: #6366f1;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 0.75rem;
+            transition: color 0.2s ease;
+        }
+
+        .btn-copy:hover {
+            color: #a855f7;
+        }
+
+        .b64-content {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.8rem;
+            color: #10b981;
+            word-break: break-all;
+            max-height: 80px;
+            overflow-y: auto;
+            line-height: 1.4;
+            padding-right: 4px;
+        }
+
+        /* 滚动条美化 */
+        .b64-content::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .b64-content::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .b64-content::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 10px;
+        }
+
+        /* 复制提示气泡 */
+        .toast {
+            position: absolute;
+            bottom: -40px;
+            left: 50%;
+            transform: translateX(-50%) translateY(10px);
+            background: var(--accent-green);
+            color: white;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            opacity: 0;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 10px rgba(16, 185, 129, 0.3);
+            pointer-events: none;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <div class="header">
+            <h1>移动端电子凭证生成中心</h1>
+            <p>基于 UTF-8 Base64 加密的标准紧凑 JSON 智能二维码引擎</p>
+        </div>
+
+        <div class="grid-layout">
+            <!-- 左侧输入表单 -->
+            <div class="form-section">
+                <div class="input-group">
+                    <label for="userCode">身份证号 / 工号 (userCode)</label>
+                    <input type="text" id="userCode" class="input-control" value="620101199909090009"
+                        placeholder="请输入身份证或工号">
+                </div>
+
+                <div class="input-group">
+                    <label for="userName">姓名 (userName)</label>
+                    <input type="text" id="userName" class="input-control" value="张三" placeholder="请输入姓名">
+                </div>
+
+                <div class="input-group">
+                    <label for="orgCode">机构编码 (orgCode)</label>
+                    <input type="text" id="orgCode" class="input-control" value="620100000000" placeholder="请输入机构编码">
+                </div>
+
+                <div class="input-group">
+                    <label for="orgName">机构名称 (orgName)</label>
+                    <input type="text" id="orgName" class="input-control" value="兰州市xxx" placeholder="请输入机构名称">
+                </div>
+
+                <button class="btn-generate" onclick="updateAndGenerate()">
+                    二维码
+                </button>
+            </div>
+
+            <!-- 右侧二维码展示 -->
+            <div class="display-section">
+                <div class="qr-wrapper">
+                    <!-- 渲染二维码的目标 Canvas -->
+                    <canvas id="qrcode-canvas"></canvas>
+                </div>
+
+                <!-- 物理尺寸参考尺标 -->
+                <div class="ruler-guide">
+                    <span>0cm</span>
+                    <div class="ruler-line"></div>
+                    <span>约 3.5cm ( 满足 &ge;2cm 要求 )</span>
+                </div>
+
+                <!-- Base64 编码显示 -->
+                <div class="b64-container">
+                    <div class="b64-header">
+                        <span>Base64 加密密文</span>
+                        <button class="btn-copy" onclick="copyBase64()">一键复制</button>
+                    </div>
+                    <div id="b64-text" class="b64-content">
+                        生成中...
+                    </div>
+                </div>
+
+                <!-- 复制成功气泡 -->
+                <div id="toast-bubble" class="toast">复制成功！</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 动态引入行业公认的高清二维码绘制库 -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.4.4/build/qrcode.min.js" onerror="handleCdnError()"></script>
+
+    <script>
+        // 全局变量保存加密字符串
+        let currentBase64 = "";
+
+        // CDN 加载失败的防灾机制
+        function handleCdnError() {
+            alert("二维码组件库加载失败，请检查您的网络连接是否顺畅。");
+            document.getElementById("b64-text").innerText = "加载失败，请联网重试以引入核心绘制组件。";
+        }
+
+        // UTF-8 兼容的高级 Base64 编码函数
+        // 核心技术点：原生 btoa(str) 在遇到中文字符（如 "张三"）时会直接报错。
+        // 通过 encodeURIComponent + unescape 机制将非 ASCII 字符转换为字节序列再进行 btoa，
+        // 完美保证多语言字节集兼容性，反序列化解密后中文绝对不乱码。
+        defSafeBase64Encode = function (str) {
+            return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, function (match, p1) {
+                return String.fromCharCode('0x' + p1);
+            }));
+        };
+
+        // 核心生成逻辑
+        function updateAndGenerate() {
+            // 1. 获取输入数据并做空值保底
+            const userCode = document.getElementById("userCode").value.trim();
+            const userName = document.getElementById("userName").value.trim();
+            const orgCode = document.getElementById("orgCode").value.trim();
+            const orgName = document.getElementById("orgName").value.trim();
+
+            if (!userCode || !userName || !orgCode || !orgName) {
+                alert("所有字段均不能为空，请补充完整。");
+                return;
+            }
+
+            // 2. 构造紧凑型标准化 JSON 对象（消除空格和格式错误）
+            const dataObj = {
+                userInfo: {
+                    userCode: userCode,
+                    userName: userName,
+                    orgCode: orgCode,
+                    orgName: orgName
+                }
+            };
+
+            // 3. 序列化为 compact string 并进行 UTF-8 安全 Base64 编码
+            const compactJsonStr = JSON.stringify(dataObj);
+            currentBase64 = defSafeBase64Encode(compactJsonStr);
+
+            // 4. 显示 Base64 密文到页面上
+            document.getElementById("b64-text").innerText = currentBase64;
+
+            // 5. 驱动 qrcode 库在 Canvas 上进行极致高清渲染
+            const canvas = document.getElementById("qrcode-canvas");
+
+            if (typeof QRCode !== 'undefined') {
+                // 采用 Medium 纠错等级 (M)
+                QRCode.toCanvas(canvas, currentBase64, {
+                    width: 228,
+                    margin: 0,
+                    color: {
+                        dark: "#000000",
+                        light: "#FFFFFF"
+                    },
+                    errorCorrectionLevel: 'M'
+                }, function (error) {
+                    if (error) {
+                        console.error(error);
+                        alert("绘制二维码失败: " + error);
+                    } else {
+                        console.log("二维码更新成功!");
+                    }
+                });
+            } else {
+                console.error("QRCode 库尚未完全加载完毕");
+            }
+        }
+
+        // 复制 Base64 功能
+        function copyBase64() {
+            if (!currentBase64) return;
+
+            // 使用现代剪贴板 API 进行复制
+            navigator.clipboard.writeText(currentBase64).then(() => {
+                const toast = document.getElementById("toast-bubble");
+                toast.classList.add("show");
+                setTimeout(() => {
+                    toast.classList.remove("show");
+                }, 2000);
+            }).catch(err => {
+                console.error("复制失败: ", err);
+                // 降级复制机制
+                const textArea = document.createElement("textarea");
+                textArea.value = currentBase64;
+                document.body.appendChild(textArea);
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    const toast = document.getElementById("toast-bubble");
+                    toast.classList.add("show");
+                    setTimeout(() => {
+                        toast.classList.remove("show");
+                    }, 2000);
+                } catch (e) {
+                    alert("复制失败，请手动选择复制。");
+                }
+                document.body.removeChild(textArea);
+            });
+        }
+
+        // 页面初始化自动生成一次
+        window.addEventListener('load', () => {
+            // 稍作等待确保 QRCode 脚本载入完成
+            setTimeout(updateAndGenerate, 300);
+        });
+    </script>
+</body>
+
+</html>
