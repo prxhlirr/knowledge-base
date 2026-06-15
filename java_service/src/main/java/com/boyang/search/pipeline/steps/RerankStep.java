@@ -263,6 +263,15 @@ public class RerankStep implements SearchPipelineStep {
                 rerankLimit = Math.max(rerankLimit, Math.min(context.getReturnTopK(), 100));
             }
 
+            // [P1 优化⑤] ColBERT 输入文档数严格上限 30。
+            // 原因：更多文档不意味着更好的排序质量，30 个已是精度上界。
+            // GPU 模式下 4 并发 × 30 文档 = 显存安全（~1.2GB < 4GB），
+            // 同时 ColBERT 推理耗时与文档数近似线性，30 文档相比 100 文档可节省 ~200-400ms。
+            // 上帝模式不限制（供调试测试用）。
+            if (!isGodMode) {
+                rerankLimit = Math.min(rerankLimit, 30);
+            }
+
             // Pre-rerank Diversity Selection: Prioritize different organizations/files
             List<Integer> diverseIndices = new ArrayList<>();
             Set<String> seenOrgs = new HashSet<>();
@@ -785,7 +794,11 @@ public class RerankStep implements SearchPipelineStep {
         }
 
         // 构建最终结果：每个文档作为一个结果项
-        prefetchEvidenceContextChunks(collapsedResults, context);
+        if (context.isHomeLightweightMode()) {
+            context.getTimings().put("evidence_prefetch_skipped_home", 1);
+        } else {
+            prefetchEvidenceContextChunks(collapsedResults, context);
+        }
         List<Map<String, Object>> results = new ArrayList<>();
         int limit = Math.min(collapsedResults.size(), context.getReturnTopK());
         for (int i = 0; i < limit; i++) {

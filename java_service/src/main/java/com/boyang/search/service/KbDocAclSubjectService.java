@@ -183,6 +183,64 @@ public class KbDocAclSubjectService {
         return allow ? Decision.ALLOW : Decision.ABSTAIN;
     }
 
+    /**
+     * [性能优化] 批量 ACL 决策：一次 IN 查询替代 N 次 findActiveBySourceAndScope。
+     * 逻辑与单条 decide() 完全一致，只是批量获取 ACL 主体后在内存中按 sourceName 分组。
+     *
+     * @param docsBySource key=sourceName, value=KbDocRegistry 实体
+     * @param identity     当前用户身份
+     * @param scope        权限范围（如 "VIEW"）
+     * @return key=sourceName, value=ACL 决策结果
+     */
+    public java.util.Map<String, Decision> batchDecide(java.util.Map<String, KbDocRegistry> docsBySource,
+                                                        JwtVerifier.UserIdentity identity,
+                                                        String scope) {
+        java.util.Map<String, Decision> results = new java.util.LinkedHashMap<>();
+        if (docsBySource == null || docsBySource.isEmpty()) {
+            return results;
+        }
+        // 没有身份信息的文档直接 ABSTAIN
+        for (String sourceName : docsBySource.keySet()) {
+            results.put(sourceName, Decision.ABSTAIN);
+        }
+
+        java.util.List<String> sourceNames = new java.util.ArrayList<>(docsBySource.keySet());
+        java.util.List<KbDocAclSubject> allSubjects = mapper.findActiveBySourcesAndScope(sourceNames, normalizeScope(scope));
+        if (allSubjects == null || allSubjects.isEmpty()) {
+            return results;
+        }
+
+        // 按 sourceName 分组
+        java.util.Map<String, java.util.List<KbDocAclSubject>> grouped = new java.util.LinkedHashMap<>();
+        for (KbDocAclSubject s : allSubjects) {
+            grouped.computeIfAbsent(s.getSourceName(), k -> new java.util.ArrayList<>()).add(s);
+        }
+
+        Set<String> principals = buildPrincipalKeys(identity);
+        for (java.util.Map.Entry<String, java.util.List<KbDocAclSubject>> entry : grouped.entrySet()) {
+            String sourceName = entry.getKey();
+            java.util.List<KbDocAclSubject> subjects = entry.getValue();
+            boolean allow = false;
+            for (KbDocAclSubject subject : subjects) {
+                String key = principalKey(subject.getSubjectType(), subject.getSubjectValue());
+                if (!principals.contains(key)) {
+                    continue;
+                }
+                if ("DENY".equalsIgnoreCase(subject.getEffect())) {
+                    results.put(sourceName, Decision.DENY);
+                    break;
+                }
+                if ("ALLOW".equalsIgnoreCase(subject.getEffect())) {
+                    allow = true;
+                }
+            }
+            if (!results.containsKey(sourceName) || results.get(sourceName) != Decision.DENY) {
+                results.put(sourceName, allow ? Decision.ALLOW : Decision.ABSTAIN);
+            }
+        }
+        return results;
+    }
+
     private List<KbDocAclSubject> buildInitialSubjects(KbDocRegistry doc,
                                                        List<String> grantedUsers,
                                                        List<String> grantedRoles,

@@ -31,6 +31,10 @@ public class VectorFetchStep implements SearchPipelineStep {
     @Autowired
     private SysAiTuningConfigService tuningConfigService;
 
+    // [P1 优化⑧] 搜索查询级缓存：缓存 dense/sparse 向量，避免重复查询重复编码
+    @Autowired
+    private com.boyang.search.util.SearchQueryCache searchQueryCache;
+
     @Override
     public void execute(SearchContext context) throws Exception {
         boolean skipLlmRewrite = context.isSkipLlmRewrite();
@@ -56,9 +60,10 @@ public class VectorFetchStep implements SearchPipelineStep {
             CompletableFuture<Map<String, Object>> hydeFuture = com.boyang.search.util.AsyncContextUtil
                     .supplyAsync(() -> gateway.fetchRewriteAndHyde(queryForMerged, true, finalDocQueryType));
 
-            CompletableFuture<List<Double>> origVecFuture = com.boyang.search.util.AsyncContextUtil.supplyAsync(() -> {
+            // [性能优化] 使用 fetchDualVector 同时获取 dense + sparse，避免后续额外 HTTP 调用
+            CompletableFuture<Map<String, Object>> docTypeDualFuture = com.boyang.search.util.AsyncContextUtil.supplyAsync(() -> {
                 try {
-                    return gateway.fetchQueryVector(queryForMerged);
+                    return gateway.fetchDualVector(queryForMerged);
                 } catch (Exception e) {
                     return null;
                 }
@@ -82,11 +87,20 @@ public class VectorFetchStep implements SearchPipelineStep {
             @SuppressWarnings("unchecked")
             List<Double> hydeVector = (List<Double>) mergedResult.get("vector");
 
+            // [性能优化] 从 fetchDualVector 提取 dense + sparse
             List<Double> origVector = null;
             try {
-                origVector = origVecFuture.get(3_000, TimeUnit.MILLISECONDS);
+                Map<String, Object> dualResult = docTypeDualFuture.get(3_000, TimeUnit.MILLISECONDS);
+                if (dualResult != null) {
+                    origVector = (List<Double>) dualResult.get("dense");
+                    @SuppressWarnings("unchecked")
+                    java.util.Map<String, Double> sparseVec = (java.util.Map<String, Double>) dualResult.get("sparse");
+                    if (sparseVec != null && !sparseVec.isEmpty()) {
+                        context.setQuerySparseVector(sparseVec);
+                    }
+                }
             } catch (Exception e) {
-                origVecFuture.cancel(true);
+                docTypeDualFuture.cancel(true);
             }
             originalQueryVector = origVector;
 
@@ -120,16 +134,37 @@ public class VectorFetchStep implements SearchPipelineStep {
             // ~500ms
             // 降级：dual 接口失败则 fallback 调用 fetchQueryVector，sparse=null(EsRecallStep 自行调用)
             if (mightNeedVector) {
-                Map<String, Object> dual = gateway.fetchDualVector(queryForMerged);
-                if (dual != null) {
-                    queryVector = (java.util.List<Double>) dual.get("dense");
-                    @SuppressWarnings("unchecked")
-                    java.util.Map<String, Double> sparseVec = (java.util.Map<String, Double>) dual.get("sparse");
-                    context.setQuerySparseVector(sparseVec); // EsRecallStep 优先读此值跳过重复调用
+                // [P1 优化⑧] 查缓存：短/精确查询复用率高，缓存命中可节省 ~600ms BGE 推理
+                queryVector = searchQueryCache.getDenseVector(queryForMerged);
+                java.util.Map<String, Double> cachedSparse = searchQueryCache.getSparseVector(queryForMerged);
+
+                if (queryVector != null) {
+                    // 缓存命中：直接使用缓存的 dense + sparse 向量
+                    if (cachedSparse != null) {
+                        context.setQuerySparseVector(cachedSparse);
+                    }
+                    System.out.println("[VectorFetchStep] Cache HIT for short/exact query, saved ~600ms");
                 } else {
-                    // dual 接口不可用（ai-service 未更新或网络问题），降级到原有单独调用
-                    System.err.println("[VectorFetchStep] fetchDualVector failed, fallback to fetchQueryVector");
-                    queryVector = gateway.fetchQueryVector(queryForMerged);
+                    // 缓存未命中：调用 fetchDualVector 并写入缓存
+                    Map<String, Object> dual = gateway.fetchDualVector(queryForMerged);
+                    if (dual != null) {
+                        queryVector = (java.util.List<Double>) dual.get("dense");
+                        @SuppressWarnings("unchecked")
+                        java.util.Map<String, Double> sparseVec = (java.util.Map<String, Double>) dual.get("sparse");
+                        context.setQuerySparseVector(sparseVec);
+                        // 写入缓存供后续相同查询使用
+                        searchQueryCache.putDenseVector(queryForMerged, queryVector);
+                        if (sparseVec != null && !sparseVec.isEmpty()) {
+                            searchQueryCache.putSparseVector(queryForMerged, sparseVec);
+                        }
+                    } else {
+                        // dual 接口不可用（ai-service 未更新或网络问题），降级到原有单独调用
+                        System.err.println("[VectorFetchStep] fetchDualVector failed, fallback to fetchQueryVector");
+                        queryVector = gateway.fetchQueryVector(queryForMerged);
+                        if (queryVector != null) {
+                            searchQueryCache.putDenseVector(queryForMerged, queryVector);
+                        }
+                    }
                 }
                 originalQueryVector = queryVector;
             }
@@ -141,18 +176,42 @@ public class VectorFetchStep implements SearchPipelineStep {
             CompletableFuture<Map<String, Object>> hydeFuture = com.boyang.search.util.AsyncContextUtil
                     .supplyAsync(() -> gateway.fetchRewriteAndHyde(queryForMerged, mightNeedVector));
 
-            // 并发获取原始查询向量（用于 HyDE Gate 相似度校验）
-            // 根因：HyDE Gate 需要对比 HyDE 向量与原始向量的余弦相似度，
-            // 若等 HyDE 返回后再取原始向量则两次请求串行，浪费 BGE 推理时间
-            CompletableFuture<List<Double>> origVecFuture = mightNeedVector
-                    ? com.boyang.search.util.AsyncContextUtil.supplyAsync(() -> {
-                        try {
-                            return gateway.fetchQueryVector(queryForMerged);
-                        } catch (Exception e) {
-                            return null;
-                        }
-                    })
-                    : CompletableFuture.completedFuture(null);
+            // [性能优化] 并发获取原始查询向量 + sparse 向量（用于 HyDE Gate + Sparse 召回通道）
+            // [P1 优化⑧] 先查缓存：长查询的原始 BGE 向量也可缓存（确定性编码）
+            List<Double> cachedOrigVec = mightNeedVector ? searchQueryCache.getDenseVector(queryForMerged) : null;
+            java.util.Map<String, Double> cachedOrigSparse = mightNeedVector ? searchQueryCache.getSparseVector(queryForMerged) : null;
+            final boolean origVecFromCache = (cachedOrigVec != null);
+
+            CompletableFuture<Map<String, Object>> dualFuture;
+            if (cachedOrigVec != null) {
+                // 缓存命中：构造 DualResult map 供后续逻辑使用，无需 HTTP 调用
+                Map<String, Object> cachedDual = new HashMap<>();
+                cachedDual.put("dense", cachedOrigVec);
+                if (cachedOrigSparse != null) {
+                    cachedDual.put("sparse", cachedOrigSparse);
+                }
+                dualFuture = CompletableFuture.completedFuture(cachedDual);
+                System.out.println("[VectorFetchStep] Long query: original vector cache HIT, saved ~600ms dual fetch");
+            } else {
+                dualFuture = mightNeedVector
+                        ? com.boyang.search.util.AsyncContextUtil.supplyAsync(() -> {
+                            try {
+                                Map<String, Object> result = gateway.fetchDualVector(queryForMerged);
+                                // 写入缓存
+                                if (result != null) {
+                                    List<Double> dense = (List<Double>) result.get("dense");
+                                    if (dense != null) searchQueryCache.putDenseVector(queryForMerged, dense);
+                                    @SuppressWarnings("unchecked")
+                                    Map<String, Double> sp = (Map<String, Double>) result.get("sparse");
+                                    if (sp != null && !sp.isEmpty()) searchQueryCache.putSparseVector(queryForMerged, sp);
+                                }
+                                return result;
+                            } catch (Exception e) {
+                                return null;
+                            }
+                        })
+                        : CompletableFuture.completedFuture(null);
+            }
 
             Map<String, Object> mergedResult;
             try {
@@ -175,12 +234,22 @@ public class VectorFetchStep implements SearchPipelineStep {
             List<Double> hydeVector = (List<Double>) mergedResult.get("vector");
 
             // 等待原始向量（若并发任务仍在运行，剩余时间内等完；失败则继续）
+            // [性能优化] 从 fetchDualVector 结果中提取 dense + sparse
             List<Double> origVector = null;
             try {
-                origVector = origVecFuture.get(3_000, TimeUnit.MILLISECONDS);
+                Map<String, Object> dualResult = dualFuture.get(3_000, TimeUnit.MILLISECONDS);
+                if (dualResult != null) {
+                    origVector = (List<Double>) dualResult.get("dense");
+                    @SuppressWarnings("unchecked")
+                    java.util.Map<String, Double> sparseVec = (java.util.Map<String, Double>) dualResult.get("sparse");
+                    if (sparseVec != null && !sparseVec.isEmpty()) {
+                        context.setQuerySparseVector(sparseVec);
+                        System.out.println("[VectorFetchStep] sparse vector pre-fetched from dual API, EsRecallStep will skip fetchSparseVector");
+                    }
+                }
             } catch (Exception e) {
-                System.err.println("[VectorFetchStep] Original vector timed out, HyDE Gate skipped.");
-                origVecFuture.cancel(true);
+                System.err.println("[VectorFetchStep] Dual vector timed out, HyDE Gate skipped.");
+                dualFuture.cancel(true);
             }
             originalQueryVector = origVector;
 

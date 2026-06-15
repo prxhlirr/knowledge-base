@@ -93,4 +93,19 @@ public interface KbDocRegistryMapper extends BaseMapper<KbDocRegistry> {
      */
     @Select("SELECT * FROM kb_doc_registry WHERE source_name = #{sourceName} ORDER BY doc_version DESC")
     List<KbDocRegistry> findAllVersionsBySourceName(@Param("sourceName") String sourceName);
+
+    /**
+     * [性能优化] 批量查询多个文档名的最新版本记录。
+     * 用于 PermissionGuard 后置过滤，将 N 次单条查询合并为 1 次 IN 查询。
+     *
+     * @param sourceNames 文档名称列表
+     * @return 匹配的最新版本记录列表（每个 source_name 最多一条 is_latest=1 的记录）
+     */
+    @Select("<script>" +
+            "SELECT * FROM kb_doc_registry WHERE source_name IN " +
+            "<foreach item='n' collection='list' open='(' separator=',' close=')'>#{n}</foreach> " +
+            "AND status IN ('INDEXED','INDEXED_FULL','INDEXED_PARTIAL','PROCESSING') " +
+            "AND is_latest = 1" +
+            "</script>")
+    List<KbDocRegistry> findBySourceNames(@Param("list") List<String> sourceNames);
 }

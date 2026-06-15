@@ -13,6 +13,9 @@ QA_INDEX_NAME  = "kb_qa_pairs"       # QA 物理索引名（仅 init 创建时�
 DOC_META_INDEX = os.getenv("KB_DOC_META_INDEX", "kb_doc_meta_v2")
 DOC_META_READ_ALIAS = os.getenv("KB_DOC_META_READ_ALIAS", "kb_doc_meta_read")
 DOC_META_WRITE_ALIAS = os.getenv("KB_DOC_META_WRITE_ALIAS", "kb_doc_meta_write")
+DOC_SEARCH_INDEX = os.getenv("KB_DOC_SEARCH_INDEX", "kb_doc_search_v1")
+DOC_SEARCH_READ_ALIAS = os.getenv("KB_DOC_SEARCH_READ_ALIAS", "kb_doc_search")
+DOC_SEARCH_WRITE_ALIAS = os.getenv("KB_DOC_SEARCH_WRITE_ALIAS", "kb_doc_search_write")
 
 # ── QA 索引读写别名（[轨道A] 别名化改造，业务代码统一使用别名不直接引用物理索引）─
 # 设计：写别名 is_write_index=True 保证 bulk 精确路由；读别名无限制支持 Reindex 期间多索引并读
@@ -55,6 +58,86 @@ def doc_meta_index_mapping() -> dict:
                     "similarity": "cosine",
                 },
             }
+        },
+    }
+
+
+def doc_search_index_mapping() -> dict:
+    return {
+        "settings": {
+            "number_of_shards": int(os.getenv("KB_DOC_SEARCH_SHARDS", "1")),
+            "number_of_replicas": int(os.getenv("KB_DOC_SEARCH_REPLICAS", "0")),
+            # ES 默认限制 max_ngram_diff <= 1，但 doc_ngram_tokenizer 使用 min=2 max=8（diff=6）
+            "max_ngram_diff": int(os.getenv("KB_DOC_SEARCH_MAX_NGRAM_DIFF", "6")),
+            "analysis": {
+                "tokenizer": {
+                    "doc_ngram_tokenizer": {
+                        "type": "ngram",
+                        "min_gram": 2,
+                        "max_gram": 8,
+                        # 不指定 token_chars，让 ngram tokenizer 处理所有字符类型（包括 CJK 汉字）。
+                        # 原配置 ["letter", "digit"] 排除了中文字符（Unicode Lo 类别），
+                        # 导致中文文件名/文号的 .ngram 子字段产生零 token，ngram 子串匹配完全失效。
+                    }
+                },
+                "analyzer": {
+                    "ik_smart": {"type": "custom", "tokenizer": "ik_smart"},
+                    "ik_max_word": {"type": "custom", "tokenizer": "ik_max_word"},
+                    "doc_ngram": {
+                        "type": "custom",
+                        "tokenizer": "doc_ngram_tokenizer",
+                        "filter": ["lowercase"],
+                    },
+                },
+            },
+        },
+        "mappings": {
+            "dynamic": "strict",
+            "properties": {
+                "doc_id": {"type": "keyword"},
+                "doc_version": {"type": "integer"},
+                "content_hash": {"type": "keyword"},
+                "source": {
+                    "type": "keyword",
+                    "fields": {
+                        "text": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+                        "ngram": {"type": "text", "analyzer": "doc_ngram", "search_analyzer": "doc_ngram"},
+                    },
+                },
+                "source_name": {"type": "keyword"},
+                "title": {
+                    "type": "text",
+                    "analyzer": "ik_max_word",
+                    "search_analyzer": "ik_smart",
+                    "fields": {
+                        "keyword": {"type": "keyword", "ignore_above": 256},
+                        "ngram": {"type": "text", "analyzer": "doc_ngram", "search_analyzer": "doc_ngram"},
+                    },
+                },
+                "document_number": {
+                    "type": "keyword",
+                    "fields": {
+                        "text": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+                        "ngram": {"type": "text", "analyzer": "doc_ngram", "search_analyzer": "doc_ngram"},
+                    },
+                },
+                "keywords": {"type": "keyword"},
+                "tags": {"type": "keyword"},
+                "entities": {"type": "keyword"},
+                "section_titles": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+                "doc_terms": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+                "summary": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+                "representative_chunk_ids": {"type": "keyword"},
+                "doc_type": {"type": "keyword"},
+                "data_source": {"type": "keyword"},
+                "is_latest": {"type": "boolean"},
+                "acl_tokens": {"type": "keyword"},
+                "visibility": {"type": "keyword"},
+                "owner_dept_id": {"type": "keyword"},
+                "publish_time": {"type": "date", "format": "yyyy-MM-dd||epoch_millis"},
+                "chunk_count": {"type": "integer"},
+                "updated_at": {"type": "date", "format": "epoch_millis"},
+            },
         },
     }
 
@@ -232,6 +315,7 @@ class ESSetup:
             self.es.indices.create(index=DOC_META_INDEX, body=doc_meta_index_mapping())
             print(f"[DocMeta] index {DOC_META_INDEX} created with dense doc_vector mapping")
         self._ensure_doc_meta_aliases()
+        self._ensure_doc_search_index()
 
         # [Fix] 动态拉取路由表，为 Java 业务端新增的分类分区创建 ES 索引
         java_host = os.getenv("JAVA_SERVICE_HOST", "http://localhost:8080")
@@ -374,6 +458,52 @@ class ESSetup:
         if actions:
             self.es.indices.update_aliases(body={"actions": actions})
             print(f"[DocMeta] aliases registered for {DOC_META_INDEX}: {DOC_META_READ_ALIAS}, {DOC_META_WRITE_ALIAS}")
+
+    def _ensure_doc_search_index(self):
+        if not self.es.indices.exists(index=DOC_SEARCH_INDEX):
+            self.es.indices.create(index=DOC_SEARCH_INDEX, body=doc_search_index_mapping())
+            print(f"[DocSearch] index {DOC_SEARCH_INDEX} created for document-level keyword retrieval")
+        self._ensure_doc_search_aliases()
+
+    def _ensure_doc_search_aliases(self):
+        actions = []
+        try:
+            current = self.es.indices.get_alias(index=DOC_SEARCH_INDEX).get(DOC_SEARCH_INDEX, {}).get("aliases", {})
+        except Exception:
+            current = {}
+
+        for alias in (DOC_SEARCH_READ_ALIAS, DOC_SEARCH_WRITE_ALIAS):
+            try:
+                alias_refs = self.es.indices.get_alias(name=alias)
+            except Exception:
+                alias_refs = {}
+            for index_name in alias_refs.keys():
+                if index_name != DOC_SEARCH_INDEX:
+                    actions.append({"remove": {
+                        "index": index_name,
+                        "alias": alias,
+                    }})
+
+        if DOC_SEARCH_READ_ALIAS not in current:
+            actions.append({"add": {
+                "index": DOC_SEARCH_INDEX,
+                "alias": DOC_SEARCH_READ_ALIAS,
+            }})
+        if current.get(DOC_SEARCH_WRITE_ALIAS, {}).get("is_write_index") is not True:
+            if DOC_SEARCH_WRITE_ALIAS in current:
+                actions.append({"remove": {
+                    "index": DOC_SEARCH_INDEX,
+                    "alias": DOC_SEARCH_WRITE_ALIAS,
+                }})
+            actions.append({"add": {
+                "index": DOC_SEARCH_INDEX,
+                "alias": DOC_SEARCH_WRITE_ALIAS,
+                "is_write_index": True,
+            }})
+
+        if actions:
+            self.es.indices.update_aliases(body={"actions": actions})
+            print(f"[DocSearch] aliases registered for {DOC_SEARCH_INDEX}: {DOC_SEARCH_READ_ALIAS}, {DOC_SEARCH_WRITE_ALIAS}")
 
     def _ensure_qa_index(self):
         """

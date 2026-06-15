@@ -80,6 +80,29 @@ public class SearchAuditLog {
      */
     private Integer postFilterDeniedCount;
 
+    private Boolean docSearchEnabled;
+    private Integer docSearchMs;
+    private Integer docSearchCandidates;
+    private Boolean docSearchPrefilterApplied;
+
+    /**
+     * [验证用] 每步管线耗时（毫秒），由 SearchContext.getTimings() 持久化。
+     * 目的：把 total_cost_ms 完整分解到各环节，精确定位 keyword 等模式的瓶颈。
+     * 命名 → 落库列名（MyBatis-Plus 驼峰转下划线）：
+     *   literalRecallMs    -> literal_recall_ms     (LiteralRecallStep)
+     *   keywordDocMatchMs  -> keyword_doc_match_ms  (KeywordDocumentMatchStep)
+     *   coarseEvidenceMs   -> coarse_evidence_ms    (KeywordCoarseEvidenceStep，取自 keyword_coarse_evidence_ms)
+     *   keywordRankMs      -> keyword_rank_ms       (KeywordRankStep)
+     *   resultAssembleMs   -> result_assemble_ms    (KeywordResultAssembleStep，取自 keyword_result_assemble_ms)
+     *   permissionFilterMs -> permission_filter_ms  (后置 PermissionGuard + Sensitive 过滤)
+     */
+    private Integer literalRecallMs;
+    private Integer keywordDocMatchMs;
+    private Integer coarseEvidenceMs;
+    private Integer keywordRankMs;
+    private Integer resultAssembleMs;
+    private Integer permissionFilterMs;
+
     /** 记录时间 */
     private LocalDateTime createTime;
 }

@@ -153,6 +153,55 @@ async def lifespan(app: FastAPI):
     else:
         print("[Lifespan] AI_START_WORKER=false; this API instance will not consume ingest jobs.")
 
+    def _run_backfill_safely():
+        """
+        业务功能：在独立后台守护线程中运行对齐迁移脚本。
+        设计决策：使用 subprocess 在独立子进程中运行 backfill_kb_doc_search.py 脚本。
+                  捕获脚本所有的 std 输出流并实时追加到本地 backfill_log.txt 中，
+                  防止输出日志泛滥污染 Uvicorn 主控制台日志，方便运维排查。
+        """
+        import sys
+        import subprocess
+        try:
+            script_path = os.path.join(os.path.dirname(__file__), "scripts", "backfill_kb_doc_search.py")
+            env = dict(os.environ)
+            # 默认使用差量对齐模式以极大地降低每次开机对 ES 数据库的负载
+            env["BACKFILL_MODE"] = os.getenv("BACKFILL_MODE", "reconcile")
+            
+            print(f"🔄 [Backfill] 启动后台文档索引迁移与元数据补全，模式: {env['BACKFILL_MODE']}...")
+            
+            # 使用 subprocess 运行子进程
+            process = subprocess.Popen(
+                [sys.executable, script_path],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding='utf-8',
+                errors='ignore'
+            )
+            
+            # 将输出写入专用的日志文件
+            log_file_path = os.path.join(os.path.dirname(__file__), "backfill_log.txt")
+            with open(log_file_path, "w", encoding="utf-8") as log_f:
+                log_f.write(f"=== 自动数据迁移对齐任务启动: {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+                for line in process.stdout:
+                    log_f.write(line)
+                    log_f.flush()
+            
+            process.wait()
+            if process.returncode == 0:
+                print("✅ [Backfill] 文档索引数据对齐与元数据补全任务执行成功！")
+            else:
+                print(f"❌ [Backfill] 迁移任务执行失败，退出码: {process.returncode}，详情请参见 backfill_log.txt")
+        except Exception as _be:
+            print(f"⚠️ [Backfill] 启动数据对准迁移后台子进程异常: {_be}")
+
+    # 自动执行文档索引迁移与补齐 (仅限具备 worker 角色且 AUTO_BACKFILL_ON_STARTUP 为真的容器生效)
+    if _env_bool("AUTO_BACKFILL_ON_STARTUP", True) and (_env_bool("AI_START_WORKER", False) or _has_capability("worker")):
+        print("🚀 [Lifespan] 开启 AUTO_BACKFILL_ON_STARTUP，正在后台拉起索引元数据对准任务线程...")
+        threading.Thread(target=_run_backfill_safely, daemon=True, name="doc-search-backfill").start()
+
     yield
     print("🛑 [Lifespan] 服务关闭清理资源...")
 

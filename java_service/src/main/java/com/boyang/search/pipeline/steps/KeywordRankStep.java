@@ -22,6 +22,10 @@ public class KeywordRankStep implements SearchPipelineStep {
     @Override
     @SuppressWarnings("unchecked")
     public void execute(SearchContext context) {
+        // [性能优化] LiteralRecall 短路时跳过排序（精确命中已自带最高分 0.99）
+        if (context.isLiteralShortCircuit()) {
+            return;
+        }
         List<Map<String, Object>> docs = context.getKeywordDocumentHits();
         if (docs == null || docs.isEmpty()) {
             context.setKeywordDocumentHits(new ArrayList<>());

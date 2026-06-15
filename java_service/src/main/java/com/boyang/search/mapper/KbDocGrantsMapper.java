@@ -90,5 +90,22 @@ public interface KbDocGrantsMapper extends BaseMapper<KbDocGrants> {
             "  AND is_active = 1 " +
             "  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)")
     List<String> findGrantedSourceNamesByUser(@Param("userId") String userId);
+
+    /**
+     * [性能优化] 批量查询多个文档的 GRANT 授权状态。
+     * 用于 PermissionGuard 后置过滤，将 N 次 isGranted 查询合并为 1 次 IN 查询。
+     *
+     * @param sourceNames 文档名称列表
+     * @param granteeId   被授权用户 ID
+     * @return 有有效授权的文档 sourceName 列表
+     */
+    @Select("<script>" +
+            "SELECT DISTINCT source_name FROM kb_doc_grants WHERE source_name IN " +
+            "<foreach item='n' collection='list' open='(' separator=',' close=')'>#{n}</foreach> " +
+            "AND grantee_id = #{granteeId} AND is_active = 1 " +
+            "AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)" +
+            "</script>")
+    List<String> findGrantedSourceNames(@Param("list") List<String> sourceNames,
+                                        @Param("granteeId") String granteeId);
 }
 

@@ -1,4 +1,18 @@
 import os
+import sys
+
+# ── 针对 Windows GBK 控制台的 Emoji 打印兼容性防御 ────────────────────────────
+# 根因：Windows 的 cmd/PowerShell 默认编码通常是 GBK。当 print() 包含 CJK/ASCII
+#       之外的特殊 Emoji（如 ⚠️、❌ 等）时，系统会抛出 UnicodeEncodeError 导致运行崩溃。
+# 修复：若在 Windows 平台下运行，强行将 stdout/stderr 的错误处理模式重设为 'replace'，
+#       使其在遇到无法编码的字符时自动降级替换，绝不阻断程序逻辑。
+if sys.platform.startswith("win"):
+    try:
+        sys.stdout.reconfigure(errors="replace")
+        sys.stderr.reconfigure(errors="replace")
+    except (AttributeError, IOError):
+        pass
+
 import math
 import unicodedata
 import numpy as np
@@ -73,8 +87,10 @@ class ModelManager:
             cls._instance = super(ModelManager, cls).__new__(cls)
             cls._instance.model = None
             cls._instance.cpu_model = None
+            cls._instance._cpu_only_model_session = None
             cls._instance.reranker = None
             cls._instance.cpu_reranker = None
+            cls._instance._cpu_only_reranker_session = None
             cls._instance.tokenizer = None
             cls._instance.rerank_tokenizer = None
             
@@ -154,6 +170,55 @@ class ModelManager:
         sess_options.log_severity_level = 3
         return sess_options
 
+    def _get_cpu_only_model(self):
+        """
+        业务功能：懒加载并持久化缓存真正的 CPU 专属 Embedding 推理会话。
+        关键流程：
+          1. 线程锁保证并发下只有一个请求在初始化 CPU 会话。
+          2. 若已缓存则直接返回。
+          3. 若未缓存，优先检测 int8 量化模型文件是否存在，在 CPU 场景下优先加载 int8
+             以提升推理速度并大幅降低内存占用；若不存在则使用 fp32 模型。
+          4. 明确指定运行提供商仅为 'CPUExecutionProvider'。
+        """
+        if not hasattr(self, "_cpu_only_model_session") or self._cpu_only_model_session is None:
+            with self._embedding_load_lock:
+                if not hasattr(self, "_cpu_only_model_session") or self._cpu_only_model_session is None:
+                    print("🔄 [ModelManager] 正在懒加载 CPU 专属 Embedding 会话...")
+                    sess_options = self._new_session_options()
+                    p_path = self.int8_model_path if self.int8_model_path.exists() else self.model_path
+                    cpu_path = os.path.normpath(str(p_path.absolute()))
+                    self._cpu_only_model_session = InferenceSession(
+                        cpu_path,
+                        sess_options=sess_options,
+                        providers=['CPUExecutionProvider']
+                    )
+                    print("✅ [ModelManager] CPU 专属 Embedding 会话加载成功。")
+        return self._cpu_only_model_session
+
+    def _get_cpu_only_reranker(self):
+        """
+        业务功能：懒加载并持久化缓存真正的 CPU 专属 Reranker 重排会话。
+        关键流程：
+          1. 线程锁保证并发下只有一个请求在初始化 CPU 会话。
+          2. 若已缓存则直接返回。
+          3. 优先检测 reranker 是否有 int8 版本，若有则优先加载 int8 以提高重排性能。
+          4. 明确指定运行提供商仅为 'CPUExecutionProvider'。
+        """
+        if not hasattr(self, "_cpu_only_reranker_session") or self._cpu_only_reranker_session is None:
+            with self._reranker_load_lock:
+                if not hasattr(self, "_cpu_only_reranker_session") or self._cpu_only_reranker_session is None:
+                    print("🔄 [ModelManager] 正在懒加载 CPU 专属 Reranker 会话...")
+                    sess_options = self._new_session_options()
+                    p_path = self.int8_reranker_path if self.int8_reranker_path.exists() else self.reranker_path
+                    cpu_path = os.path.normpath(str(p_path.absolute()))
+                    self._cpu_only_reranker_session = InferenceSession(
+                        cpu_path,
+                        sess_options=sess_options,
+                        providers=['CPUExecutionProvider']
+                    )
+                    print("✅ [ModelManager] CPU 专属 Reranker 会话加载成功。")
+        return self._cpu_only_reranker_session
+
     def _provider_pair(self):
         sess_options = self._new_session_options()
         available_providers = onnxruntime.get_available_providers()
@@ -225,6 +290,8 @@ class ModelManager:
         with self._embedding_load_lock:
             self.model = None
             self.cpu_model = None
+            if hasattr(self, "_cpu_only_model_session"):
+                self._cpu_only_model_session = None
             self.tokenizer = None
             self._embedding_cache.clear()
             self.device = "cpu"
@@ -234,6 +301,8 @@ class ModelManager:
         with self._reranker_load_lock:
             self.reranker = None
             self.cpu_reranker = None
+            if hasattr(self, "_cpu_only_reranker_session"):
+                self._cpu_only_reranker_session = None
             self.rerank_tokenizer = None
             self._rerank_cache.clear()
             self.reranker_device = "cpu"
@@ -421,7 +490,12 @@ class ModelManager:
         
         try:
             output_names = [o.name for o in self.model.get_outputs()]
-            outputs = self.model.run(output_names, input_feed)
+            try:
+                outputs = self.model.run(output_names, input_feed)
+            except Exception as run_err:
+                print(f"[WARN] Embedding GPU 推理失败: {run_err}。尝试在 CPU 上进行降级重试...")
+                cpu_sess = self._get_cpu_only_model()
+                outputs = cpu_sess.run(None, input_feed)
             
             # BGE-M3 的输出维度通常为 [batch, seq_len, dim] (ndim=3) 或直接 [batch, dim] (ndim=2)
             feat = outputs[0]
@@ -438,31 +512,7 @@ class ModelManager:
             return normalized_embeddings
             
         except Exception as e:
-            # --- 自动降级逻辑: 针对 DirectML 算子崩溃进行 CPU 回退重试 ---
-            is_dml = "DML" in self.device
-            print(f"⚠️ Embedding Run Failed (Device={self.device}): {e}")
-            
-            if is_dml:
-                print("🔄 [Fallback] GPU Execution Failed. Retrying on CPU for stability...")
-                try:
-                    if self.cpu_model:
-                        outputs = self.cpu_model.run(None, input_feed)
-                        feat = outputs[0]
-                        embeddings = feat[:, 0, :] if feat.ndim == 3 else feat
-                        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-                        return (embeddings / (norms + 1e-9)).tolist()
-                    else:
-                        # 备用方案：如果cpu_model未加载，创建临时会话
-                        m_path = os.path.normpath(str(self.model_path.absolute()))
-                        cpu_sess = InferenceSession(m_path, providers=['CPUExecutionProvider'])
-                        outputs = cpu_sess.run(None, input_feed)
-                        feat = outputs[0]
-                        embeddings = feat[:, 0, :] if feat.ndim == 3 else feat
-                        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-                        return (embeddings / (norms + 1e-9)).tolist()
-                except Exception as ex:
-                    print(f"❌ [Fallback Failed] CPU retry also failed: {ex}")
-            
+            print(f"[ERROR] Embedding Run Failed: {e}")
             import traceback
             traceback.print_exc()
             return []
@@ -545,7 +595,13 @@ class ModelManager:
 
         try:
             # 复用 encode_colbert 的 ONNX 推理路径：last_hidden_state 已包含全量 token 向量
-            outputs = self.model.run(["last_hidden_state"], input_feed)
+            try:
+                outputs = self.model.run(["last_hidden_state"], input_feed)
+            except Exception as run_err:
+                print(f"[WARN] [Sparse] GPU 推理失败: {run_err}。尝试在 CPU 上进行降级重试...")
+                cpu_sess = self._get_cpu_only_model()
+                outputs = cpu_sess.run(["last_hidden_state"], input_feed)
+            
             hidden = outputs[0]                    # [batch, seq_len, 1024]
             attention_mask = inputs["attention_mask"]  # [batch, seq_len]
             input_ids = inputs["input_ids"]            # [batch, seq_len]
@@ -694,7 +750,13 @@ class ModelManager:
         try:
             # ── 单次 ONNX 推理，取全部输出（dense + sparse 同时获取）──────────────
             all_output_names = [o.name for o in self.model.get_outputs()]
-            raw_outputs = self.model.run(all_output_names, input_feed)
+            try:
+                raw_outputs = self.model.run(all_output_names, input_feed)
+            except Exception as run_err:
+                print(f"[WARN] [DualEncode] GPU 推理失败: {run_err}。尝试在 CPU 上进行降级重试...")
+                cpu_sess = self._get_cpu_only_model()
+                raw_outputs = cpu_sess.run(all_output_names, input_feed)
+            
             output_map = {name: tensor for name, tensor in zip(all_output_names, raw_outputs)}
 
             # ── ① Dense 稠密向量：取 CLS token（与 encode() 完全一致）─────────────
@@ -811,27 +873,18 @@ class ModelManager:
                 input_feed[k] = val
         
         try:
-            outputs = self.reranker.run(None, input_feed)
+            try:
+                outputs = self.reranker.run(None, input_feed)
+            except Exception as run_err:
+                print(f"[WARN] [Reranker] GPU 推理失败: {run_err}。尝试在 CPU 上进行降级重试...")
+                cpu_sess = self._get_cpu_only_reranker()
+                outputs = cpu_sess.run(None, input_feed)
             logits = outputs[0]
         except Exception as e:
-            is_dml = "DML" in getattr(self, "device", "CPU")
-            print(f"❌ Reranker Run Failed: {e}")
-            if is_dml:
-                print("🔄 [Fallback] GPU Execution Failed. Retrying on CPU for stability...")
-                try:
-                    if hasattr(self, 'cpu_reranker') and self.cpu_reranker is not None:
-                        outputs = self.cpu_reranker.run(None, input_feed)
-                        logits = outputs[0]
-                    else:
-                        r_path = os.path.normpath(str(self.reranker_path.absolute()))
-                        cpu_sess = InferenceSession(r_path, providers=['CPUExecutionProvider'])
-                        outputs = cpu_sess.run(None, input_feed)
-                        logits = outputs[0]
-                except Exception as ex:
-                    print(f"❌ [Fallback Failed] CPU retry also failed: {ex}")
-                    return [0.0] * len(documents)
-            else:
-                return [0.0] * len(documents)
+            print(f"[ERROR] Reranker Run Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return [0.0] * len(documents)
         
         if logits.ndim == 1:
             scores = logits.tolist()

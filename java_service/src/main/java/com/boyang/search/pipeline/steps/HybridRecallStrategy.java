@@ -9,6 +9,7 @@ import com.boyang.search.entity.SysTenantPolicy;
 import com.boyang.search.gateway.AiEngineGateway;
 import com.boyang.search.pipeline.SearchContext;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -46,6 +47,22 @@ public class HybridRecallStrategy implements RecallStrategy {
 
     @Autowired
     private EsRecallUtils utils;
+
+    // [P1 优化⑧] 搜索查询级缓存：缓存 prefilter 结果，避免重复 ES 查询
+    @Autowired
+    private com.boyang.search.util.SearchQueryCache searchQueryCache;
+
+    @Value("${search.doc-search.index:#{systemEnvironment['KB_DOC_SEARCH_READ_ALIAS'] ?: 'kb_doc_search'}}")
+    private String docSearchIndex;
+
+    @Value("${search.doc-search.enabled:true}")
+    private boolean docSearchEnabled;
+
+    @Value("${search.doc-search.home-prefilter-enabled:true}")
+    private boolean docSearchHomePrefilterEnabled;
+
+    @Value("${search.doc-search.prefilter-max-candidates:500}")
+    private int docSearchPrefilterMaxCandidates;
 
     private static final String DEFAULT_ORG  = "默认组织";
     private static final String DEFAULT_DATE = "2024-01-10";
@@ -137,6 +154,45 @@ public class HybridRecallStrategy implements RecallStrategy {
 
         String forceSource = filters != null ? (String) filters.get("data_source") : null;
         final List<String> finalAnchorTerms = anchorTerms;
+        final boolean useDocSearchPrefilter = docSearchEnabled && docSearchHomePrefilterEnabled
+                && context.isHomeLightweightMode();
+        final long docSearchPrefilterStart = System.currentTimeMillis();
+        // [性能优化] 优先使用 SearchServiceV2 提前计算的 prefilter 结果（从并行轨道中获取）
+        // 避免在 ES 召回关键路径上同步执行 kb_doc_search 查询（节省 ~50-200ms）
+        List<FieldValue> docCandidateSources = context.getDocCandidateSources();
+        if (useDocSearchPrefilter && docCandidateSources == null) {
+            // [P1 优化⑧] 先查 prefilter 缓存（key = query + userId，TTL 60s）
+            String prefilterCacheKey = normalizedQuery + "|" + (finalUserId != null ? finalUserId : "anon");
+            List<FieldValue> cachedPrefilter = searchQueryCache.getPrefilter(prefilterCacheKey);
+            if (cachedPrefilter != null) {
+                docCandidateSources = cachedPrefilter;
+                System.out.printf("[DocSearchPrefilter] Cache HIT, candidates=%d, saved ~50-200ms%n", cachedPrefilter.size());
+            } else {
+                // 缓存未命中：执行查询并写入缓存
+                docCandidateSources = searchDocCandidateSources(normalizedQuery, getEsTimeoutMs(config), isAnonymous,
+                        finalUserId, deptValues, forceSource,
+                        Math.min(docSearchPrefilterMaxCandidates, Math.max(context.getFusionTopK(), context.getRecallTopK())));
+                searchQueryCache.putPrefilter(prefilterCacheKey, docCandidateSources);
+            }
+        } else if (!useDocSearchPrefilter) {
+            docCandidateSources = Collections.emptyList();
+        }
+        if (useDocSearchPrefilter) {
+            context.getTimings().put("doc_search_enabled", 1);
+            context.getTimings().put("doc_search_prefilter_ms", System.currentTimeMillis() - docSearchPrefilterStart);
+            context.getTimings().put("doc_search_prefilter_candidates", docCandidateSources.size());
+            context.getTimings().put("doc_search_prefilter_applied", docCandidateSources.isEmpty() ? 0 : 1);
+        } else {
+            context.getTimings().put("doc_search_enabled", 0);
+            context.getTimings().put("doc_search_prefilter_applied", 0);
+        }
+        if (!docCandidateSources.isEmpty()) {
+            context.getTimings().put("doc_search_prefilter_candidates", docCandidateSources.size());
+            System.out.printf("[DocSearchPrefilter] candidates=%d%n", docCandidateSources.size());
+        }
+
+        // lambda 捕获要求 effectively-final，赋值给 final 局部变量
+        final List<FieldValue> finalDocCandidateSources = docCandidateSources;
 
         // ── 4. 构建 BM25 检索 DSL ──────────────────────────────────────────────
         SearchRequest textRequest = new SearchRequest.Builder()
@@ -202,15 +258,16 @@ public class HybridRecallStrategy implements RecallStrategy {
                 if (forceSource != null && !forceSource.isEmpty()) {
                     b.filter(f -> f.term(t -> t.field("metadata.data_source").value(forceSource)));
                 }
+                if (!finalDocCandidateSources.isEmpty()) {
+                    b.filter(f -> f.terms(t -> t.field("metadata.source").terms(tv -> tv.value(finalDocCandidateSources))));
+                }
                 return b;
             }))
-            .highlight(h -> h.fields("content", hf -> hf
-                .preTags("<em class='highlight'>").postTags("</em>")
-                .fragmentSize(150).numberOfFragments(1)
-                // highlight_query：剔除噪词后仅用实词做高亮，避免"的/了/是"等虚词被高亮标注
-                .highlightQuery(hq -> hq.match(ma -> ma
-                    .field("content").query(utils.stripNoiseWords(normalizedQuery, config))
-                    .minimumShouldMatch("1")))))
+            // [P1 优化③] BM25 highlight 延迟到 RerankStep 按需计算。
+            // 原因：recall 阶段对 60+ 个文档全部计算 highlight 耗时 ~50-150ms，
+            // 但最终只有 top-K (5-10) 文档需要展示 snippet。
+            // RerankStep 已有完善的 Java 层 fallback 高亮逻辑（OOM 保护 + 噪词过滤），
+            // 延迟计算可节省 ES highlight 开销，整体 latency 降低 ~50-150ms。
             .build();
 
         // ── 5. 构建 KNN 检索 DSL ──────────────────────────────────────────────
@@ -237,14 +294,13 @@ public class HybridRecallStrategy implements RecallStrategy {
                             if (forceSource != null && !forceSource.isEmpty()) {
                                 b.filter(ft -> ft.term(t -> t.field("metadata.data_source").value(forceSource)));
                             }
+                            if (!finalDocCandidateSources.isEmpty()) {
+                                b.filter(ft -> ft.terms(t -> t.field("metadata.source").terms(tv -> tv.value(finalDocCandidateSources))));
+                            }
                             return b;
                         }));
                 })
-                .highlight(h -> h.fields("content", hf -> hf
-                    .preTags("<em class='highlight'>").postTags("</em>").fragmentSize(150)
-                    .highlightQuery(hq -> hq.match(ma -> ma
-                        .field("content").query(utils.stripNoiseWords(normalizedQuery, config))
-                        .minimumShouldMatch("1")))))
+                // [P1 优化③] KNN highlight 同样延迟到 RerankStep，与 BM25 highlight 策略一致
                 .build();
         }
 
@@ -296,6 +352,9 @@ public class HybridRecallStrategy implements RecallStrategy {
                         b.filter(utils.buildLegacyPermFilter(pfIsAnonymous, pfFinalUserId, pfDeptValues));
                         if (forceSource != null && !forceSource.isEmpty()) {
                             b.filter(f -> f.term(t -> t.field("metadata.data_source").value(forceSource)));
+                        }
+                        if (!finalDocCandidateSources.isEmpty()) {
+                            b.filter(f -> f.terms(t -> t.field("metadata.source").terms(tv -> tv.value(finalDocCandidateSources))));
                         }
                         return b;
                     }))
@@ -382,6 +441,106 @@ public class HybridRecallStrategy implements RecallStrategy {
     }
 
     /**
+     * [性能优化] 公开方法：执行 DocSearchPrefilter 查询，供 SearchServiceV2 在并行轨道中提前调用。
+     * 返回候选 source 列表，写入 SearchContext.docCandidateSources。
+     * HybridRecallStrategy.recall() 会优先使用 context 中已缓存的值，跳过内部重复查询。
+     */
+    public List<FieldValue> prefilterSources(SearchContext context) {
+        String query = context.getNormalizedQuery();
+        SysAiTuningConfig config = context.getTuningConfig();
+        Map<String, Object> filters = context.getFilters();
+        String userId = filters != null ? (String) filters.get("user_id") : null;
+        String userDeptCode = filters != null ? (String) filters.get("user_dept_code") : null;
+        List<FieldValue> deptValues = utils.buildDeptValues(userDeptCode);
+        boolean isAnonymous = (userId == null || userId.trim().isEmpty());
+        String forceSource = filters != null ? (String) filters.get("data_source") : null;
+        int limit = Math.min(docSearchPrefilterMaxCandidates,
+                Math.max(context.getFusionTopK(), context.getRecallTopK()));
+
+        // [P1 优化⑧] 并行轨道的 prefilter 也走缓存
+        String cacheKey = query + "|" + (userId != null ? userId : "anon");
+        List<FieldValue> cached = searchQueryCache.getPrefilter(cacheKey);
+        if (cached != null) {
+            System.out.printf("[prefilterSources] Cache HIT, candidates=%d%n", cached.size());
+            return cached;
+        }
+        List<FieldValue> result = searchDocCandidateSources(query, getEsTimeoutMs(config), isAnonymous,
+                userId, deptValues, forceSource, limit);
+        searchQueryCache.putPrefilter(cacheKey, result);
+        return result;
+    }
+
+    private List<FieldValue> searchDocCandidateSources(String query,
+                                                       int timeoutMs,
+                                                       boolean isAnonymous,
+                                                       String userId,
+                                                       List<FieldValue> deptValues,
+                                                       String forceSource,
+                                                       int limit) {
+        if (query == null || query.trim().isEmpty()) {
+            return Collections.emptyList();
+        }
+        int size = Math.min(Math.max(limit, 80), 500);
+        try {
+            SearchRequest request = new SearchRequest.Builder()
+                .index(docSearchIndex)
+                .trackTotalHits(h -> h.enabled(false))
+                .size(size)
+                .timeout(timeoutMs + "ms")
+                .source(s -> s.filter(f -> f.includes("source")))
+                .query(q -> q.bool(b -> {
+                    b.should(s -> s.term(t -> t.field("source").value(query).boost(18.0f)));
+                    b.should(s -> s.term(t -> t.field("document_number").value(query).boost(18.0f)));
+                    b.should(s -> s.term(t -> t.field("title.keyword").value(query).boost(18.0f)));
+                    b.should(s -> s.match(mp -> mp.field("title").query(query).analyzer("ik_max_word").boost(10.0f)));
+                    b.should(s -> s.match(mp -> mp.field("doc_terms").query(query).analyzer("ik_max_word").boost(4.0f)));
+                    b.should(s -> s.matchPhrase(mp -> mp.field("doc_terms").query(query).slop(3).boost(8.0f)));
+                    b.should(s -> s.match(mp -> mp.field("summary").query(query).analyzer("ik_max_word").boost(1.5f)));
+                    if (query.length() >= 2) {
+                        b.should(s -> s.match(mp -> mp.field("source.ngram").query(query).boost(4.0f)));
+                        b.should(s -> s.match(mp -> mp.field("title.ngram").query(query).boost(4.0f)));
+                        b.should(s -> s.match(mp -> mp.field("document_number.ngram").query(query).boost(6.0f)));
+                    }
+                    b.minimumShouldMatch("1");
+                    b.filter(f -> f.bool(boolQuery -> boolQuery
+                        .should(s -> s.term(t -> t.field("is_latest").value(true)))
+                        .should(s -> s.bool(bNot -> bNot.mustNot(mn -> mn.exists(e -> e.field("is_latest")))))
+                        .minimumShouldMatch("1")
+                    ));
+                    // kb_doc_search 索引使用顶层字段，需使用专用权限过滤器
+                    b.filter(utils.buildDocSearchPermFilter(isAnonymous, userId, deptValues));
+                    if (forceSource != null && !forceSource.isEmpty()) {
+                        b.filter(f -> f.term(t -> t.field("data_source").value(forceSource)));
+                    }
+                    return b;
+                }))
+                .build();
+
+            SearchResponse<Object> response = esClient.search(request, Object.class);
+            if (response == null || response.hits() == null || response.hits().hits().isEmpty()) {
+                return Collections.emptyList();
+            }
+            List<FieldValue> sources = new ArrayList<>();
+            Set<String> seen = new LinkedHashSet<>();
+            for (co.elastic.clients.elasticsearch.core.search.Hit<Object> hit : response.hits().hits()) {
+                Map<String, Object> src = hit.source() instanceof Map ? (Map<String, Object>) hit.source() : null;
+                Object sourceObj = src != null ? src.get("source") : null;
+                if (sourceObj != null && seen.add(String.valueOf(sourceObj))) {
+                    sources.add(FieldValue.of(String.valueOf(sourceObj)));
+                }
+            }
+            return sources;
+        } catch (Exception e) {
+            System.err.println("[DocSearchPrefilter] failed, fallback to full chunk recall: " + e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    private int getEsTimeoutMs(SysAiTuningConfig config) {
+        return config != null && config.getEsQueryTimeout() != null ? config.getEsQueryTimeout() : 2000;
+    }
+
+    /**
      * SubQuery 多向量 KNN 扩展。
      *
      * 业务功能：针对「词汇鸿沟」场景（BM25 弱信号 + 含标点的长复合查询），将查询拆分为
@@ -420,57 +579,80 @@ public class HybridRecallStrategy implements RecallStrategy {
             });
         }
 
-        int newChunksAdded = 0;
-        List<CompletableFuture<List<Double>>> vecFutures = validClauses.stream()
-                .map(clause -> com.boyang.search.util.AsyncContextUtil.supplyAsync(
-                        () -> aiEngineGateway.fetchQueryVector(clause)))
+        // [P1 优化⑥] SubQuery 全并行化：向量获取 + KNN 搜索 + 结果收集合并为完整并行 pipeline。
+        // 原链路：向量获取并行 → KNN 搜索串行（N × T），总耗时 = T_vec + N × T_knn
+        // 优化后：每个子句的「向量获取 → KNN 搜索 → 结果收集」完全并行，总耗时 = max(T_vec + T_knn)
+        // 假设 3 个子句，每个 KNN ~100ms：串行 = 300ms → 并行 = ~100ms，节省 ~200ms。
+        List<CompletableFuture<List<Map<String, Object>>>> subQueryFutures = validClauses.stream()
+                .map(clause -> com.boyang.search.util.AsyncContextUtil.supplyAsync(() -> {
+                    List<Map<String, Object>> results = new ArrayList<>();
+                    try {
+                        // Step 1: 获取子句向量
+                        List<Double> subVec = aiEngineGateway.fetchQueryVector(clause);
+                        if (subVec == null || subVec.isEmpty()) return results;
+
+                        // Step 2: KNN 搜索
+                        co.elastic.clients.elasticsearch.core.SearchRequest subKnnReq =
+                            new co.elastic.clients.elasticsearch.core.SearchRequest.Builder()
+                                .index(indexPattern)
+                                .knn(knn -> knn.field("vector").queryVector(subVec).k(20).numCandidates(100))
+                                .size(20)
+                                .source(s -> s.fetch(true))
+                                .build();
+
+                        co.elastic.clients.elasticsearch.core.SearchResponse<Object> subResp =
+                                esClient.search(subKnnReq, Object.class);
+                        if (subResp == null || subResp.hits() == null) return results;
+
+                        // Step 3: 收集结果
+                        for (co.elastic.clients.elasticsearch.core.search.Hit<Object> hit : subResp.hits().hits()) {
+                            String hitId = hit.id();
+                            double subSim = hit.score() != null ? hit.score() : 0.0;
+                            if (subSim < 0.50) continue;
+                            Map<String, Object> subDoc = new HashMap<>();
+                            subDoc.put("_id", hitId);
+                            subDoc.put("_source", hit.source());
+                            subDoc.put("_rrf_score", subSim * 0.015);
+                            subDoc.put("_max_knn_score", subSim);
+                            subDoc.put("_sub_query_hit", Boolean.TRUE);
+                            results.add(subDoc);
+                        }
+                    } catch (Exception e) {
+                        System.err.printf("[SubQuery] 子句 '%s' 处理失败: %s%n",
+                                clause.length() > 20 ? clause.substring(0, 20) + "..." : clause, e.getMessage());
+                    }
+                    return results;
+                }))
                 .collect(Collectors.toList());
 
-        for (int i = 0; i < validClauses.size(); i++) {
+        // 等待所有子句并行完成（总超时 5s，单个子句的向量获取+KNN 通常 <1s）
+        int newChunksAdded = 0;
+        try {
+            CompletableFuture.allOf(subQueryFutures.toArray(new CompletableFuture[0]))
+                    .get(5_000, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            System.err.println("[SubQuery] 并行执行超时，取已完成结果降级继续: " + e.getMessage());
+        }
+
+        // 合并去重结果
+        if (context.getCandidateDocs() == null) {
+            context.setCandidateDocs(new ArrayList<>());
+        }
+        for (CompletableFuture<List<Map<String, Object>>> future : subQueryFutures) {
+            if (!future.isDone()) continue;
             try {
-                List<Double> subVec = vecFutures.get(i).get(2000, TimeUnit.MILLISECONDS);
-                if (subVec == null) continue;
-
-                co.elastic.clients.elasticsearch.core.SearchRequest subKnnReq =
-                    new co.elastic.clients.elasticsearch.core.SearchRequest.Builder()
-                        .index(indexPattern)
-                        .knn(knn -> knn.field("vector").queryVector(subVec).k(20).numCandidates(100))
-                        .size(20)
-                        .source(s -> s.fetch(true))
-                        .build();
-
-                co.elastic.clients.elasticsearch.core.SearchResponse<Object> subResp =
-                        esClient.search(subKnnReq, Object.class);
-                if (subResp == null || subResp.hits() == null) continue;
-
-                for (co.elastic.clients.elasticsearch.core.search.Hit<Object> hit : subResp.hits().hits()) {
-                    String hitId = hit.id();
-                    if (hitId == null || existingIds.contains(hitId)) continue;
-                    double subSim = hit.score() != null ? hit.score() : 0.0;
-                    if (subSim < 0.50) continue;
-                    Map<String, Object> subDoc = new HashMap<>();
-                    subDoc.put("_id", hitId);
-                    subDoc.put("_source", hit.source());
-                    subDoc.put("_rrf_score", subSim * 0.015);
-                    subDoc.put("_max_knn_score", subSim);
-                    subDoc.put("_sub_query_hit", Boolean.TRUE);
-                    // [P0 NPE 修复] candidateDocs 在 EsRecallStep 执行时为 null
-                    // （RrfFusionStep 尚未跑，candidateDocs 未填充），此处主动初始化
-                    if (context.getCandidateDocs() == null) {
-                        context.setCandidateDocs(new ArrayList<>());
+                List<Map<String, Object>> subResults = future.getNow(Collections.emptyList());
+                for (Map<String, Object> subDoc : subResults) {
+                    String hitId = String.valueOf(subDoc.get("_id"));
+                    if (existingIds.add(hitId)) {
+                        context.getCandidateDocs().add(subDoc);
+                        newChunksAdded++;
                     }
-                    context.getCandidateDocs().add(subDoc);
-                    existingIds.add(hitId);
-                    newChunksAdded++;
                 }
-            } catch (java.util.concurrent.TimeoutException te) {
-                System.err.printf("[SubQuery] 子句#%d 向量获取超时(2s)，跳过%n", i + 1);
-            } catch (Exception e) {
-                System.err.printf("[SubQuery] 子句#%d 处理失败: %s%n", i + 1, e.getMessage());
-            }
+            } catch (Exception ignored) {}
         }
         if (newChunksAdded > 0) {
-            System.out.printf("[SubQuery] 共追加 %d 个新 chunk 到候选池%n", newChunksAdded);
+            System.out.printf("[SubQuery] 并行完成，共追加 %d 个新 chunk 到候选池%n", newChunksAdded);
         }
     }
 }

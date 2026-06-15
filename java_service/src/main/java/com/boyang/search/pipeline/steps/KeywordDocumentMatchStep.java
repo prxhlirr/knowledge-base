@@ -108,13 +108,34 @@ public class KeywordDocumentMatchStep implements SearchPipelineStep {
         return !needle.isEmpty() && haystack.contains(needle);
     }
 
+    /**
+     * 业务功能：从 _source 中生成用于关键词匹配过滤的可检索文本
+     * 关键方法：buildSearchableText
+     * 流程描述：
+     *   1. 优先提取 content, display_content, doc_title, keywords。
+     *   2. 从外层平铺字段中读取 title, source, document_number, tags, tags_kw, search_queries 等。
+     *   3. 提取 metadata 中的各子项（如 title, source, document_number, tags, tags_kw, search_queries 等）。
+     *   4. 以上各步骤在 metadata 为 null 或存在嵌套数据结构差异时，能够自动 fallback 互补拼接，提高召回率和匹配精度。
+     */
     @SuppressWarnings("unchecked")
     private String buildSearchableText(Map<String, Object> source) {
         StringBuilder sb = new StringBuilder();
+        if (source == null) {
+            return "";
+        }
         append(sb, source.get("content"));
         append(sb, source.get("display_content"));
         append(sb, source.get("doc_title"));
         append(sb, source.get("keywords"));
+        
+        // 兼容平铺元数据模式，直接从根级合并抽取检索字段
+        append(sb, source.get("title"));
+        append(sb, source.get("source"));
+        append(sb, source.get("document_number"));
+        append(sb, source.get("tags"));
+        append(sb, source.get("tags_kw"));
+        append(sb, source.get("search_queries"));
+
         Map<String, Object> metadata = castMap(source.get("metadata"));
         if (metadata != null) {
             append(sb, metadata.get("title"));
@@ -147,15 +168,42 @@ public class KeywordDocumentMatchStep implements SearchPipelineStep {
         sb.append('\n').append(obj);
     }
 
+    /**
+     * 业务功能：提取文档在整条搜索管线中流转的唯一标识（docKey）
+     * 关键方法：buildDocKey
+     * 流程描述：
+     *   1. 优先从底层 _source 或元数据中获取 keyword 类型的 doc_id (如内容 MD5 哈希)。
+     *   2. 如果没有 doc_id，退化返回文件名（source 或 metadata.source），保证老旧索引文档能通过文件名进行关联 chunks 检索。
+     *   3. 如果前两者均没有，最后退化提取 ES 的 doc ID 哈希（extractDocHash），满足零版本迁移的平滑升级需求。
+     */
     private String buildDocKey(String hitId, Map<String, Object> source) {
-        Map<String, Object> metadata = castMap(source.get("metadata"));
-        if (metadata != null) {
-            String docId = firstNonEmpty(
-                    stringValue(metadata.get("doc_id")),
-                    stringValue(metadata.get("content_hash")),
-                    stringValue(metadata.get("doc_hash")));
-            if (!docId.isEmpty()) {
-                return docId;
+        String docId = null;
+        if (source != null && source.containsKey("doc_id")) {
+            docId = stringValue(source.get("doc_id"));
+        }
+        if ((docId == null || docId.trim().isEmpty() || "none".equalsIgnoreCase(docId.trim())) && source != null) {
+            Map<String, Object> metadata = castMap(source.get("metadata"));
+            if (metadata != null && metadata.containsKey("doc_id")) {
+                docId = stringValue(metadata.get("doc_id"));
+            }
+        }
+        // [防 "None" 脏数据漏洞]
+        // 解释：针对物理索引缺失字段反序列化出的 "None" 脏数据进行主动拦截，
+        // 确保能退化为文件名，实现和召回策略类同样稳健的 ID 校验逻辑。
+        if (docId != null && !docId.trim().isEmpty() && !"none".equalsIgnoreCase(docId.trim())) {
+            return docId;
+        }
+        // 如果缺少新版 doc_id 标识，优先提取文件名作为 docKey 供 downstream match 兼容过滤老分片
+        if (source != null) {
+            String sourceFile = stringValue(source.get("source"));
+            if (sourceFile.isEmpty()) {
+                Map<String, Object> metadata = castMap(source.get("metadata"));
+                if (metadata != null) {
+                    sourceFile = stringValue(metadata.get("source"));
+                }
+            }
+            if (!sourceFile.isEmpty()) {
+                return sourceFile;
             }
         }
         return extractDocHash(hitId);

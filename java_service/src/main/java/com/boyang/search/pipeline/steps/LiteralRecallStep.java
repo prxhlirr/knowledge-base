@@ -84,9 +84,17 @@ public class LiteralRecallStep implements SearchPipelineStep {
 
             if (!results.isEmpty()) {
                 context.setLiteralHitCount(results.size());
-                context.setFinalResult(results);
-                System.out.printf("[LiteralRecall] exact metadata hit count=%d index=%s%n",
-                        results.size(), indexPattern);
+                if ("keyword".equals(context.getSearchMode())) {
+                    // Keyword 模式：不设置 finalResult，避免短路后续 BM25 Pipeline。
+                    // 存入 fastTrackDocs，由 KeywordResultAssembleStep 合并，literal 命中优先级最高。
+                    context.setFastTrackDocs(results);
+                    System.out.printf("[LiteralRecall] keyword mode deferred, literal hits=%d%n", results.size());
+                } else {
+                    // Hybrid/Semantic 模式：精确命中高置信度，短路 Pipeline 节省延迟。
+                    context.setFinalResult(results);
+                    System.out.printf("[LiteralRecall] short-circuit, literal hits=%d index=%s%n",
+                            results.size(), indexPattern);
+                }
             } else {
                 context.setLiteralHitCount(0);
             }

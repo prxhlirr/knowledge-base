@@ -80,6 +80,15 @@ public class SearchController {
     private long searchTotalTimeoutMs;
 
     /**
+     * [性能/可回滚] 首页 keyword 检索是否走 Redis 结果缓存。
+     * /home 的 keyword 轨原本直接调 hybridSearchV2，绕过 SearchCacheService，每次全量重算。
+     * 开启后复用与 /search 一致的缓存（key 含 aclDigest/policyVersion，PRIVATE/GRANT 自动剔除）。
+     * 默认 true；若需回滚设为 false 即恢复"每次全量"行为。
+     */
+    @Value("${search.home.cache.enabled:true}")
+    private boolean homeKeywordCacheEnabled;
+
+    /**
      * <h2>[高并发隔离模式] 专属混合检索线程池</h2>
      * <p><strong>设计模式背景</strong>：彻底将复杂的 RAG 混合检索及重排序计算从公共 {@code ForkJoinPool} 以及 Tomcat 容器的 Worker 线程池中进行物理隔离。</p>
      * <p><strong>配置说明</strong>：固定 20 个工作线程，且全部注册为守护线程（Daemon Thread）。这可确保在 JVM 异常退出或应用重新部署时线程能够自行优雅释放，避免因大量慢检索任务耗尽公共业务线程池而拖慢整站。</p>
@@ -375,17 +384,39 @@ public class SearchController {
             // - 若无 fileName，则退化为 match_all + 500 限制（调试兜底，生产应总传 fileName）
             // 不同单位同名文件的区分：由 RerankStep dedupeKey 使用 hash 保证搜索结果层面不混淆；
             // chunks 展示层若需要隔离，前端传 deptCode 参数追加 filter 即可（后续迭代）。
-            final String finalFileName = fileName;
+            // ── 构建分片查询 DSL ──────────────────────────────────────────────────────
+            // 业务功能：根据唯一文档哈希标识或文件名检索其下的全部粗粒度分片明细
+            // 关键流程：
+            //   1. 优先使用高效率检索：如果 docId 存在且不是 "by-file-name"，说明有内容 Hash，
+            //      此时直接针对 metadata.doc_id (keyword 类型) 构建高效的 term 精确检索 (O(1) 复杂度)。
+            //   2. 降级适配旧版本：如果无 docId，则降级至对 metadata.source 字段构建 matchPhrase 检索（文件名模糊匹配）。
             co.elastic.clients.elasticsearch.core.SearchRequest chunksReq;
-            if (finalFileName != null && !finalFileName.trim().isEmpty()) {
-                // 精确模式：用文件名 match_phrase（等同精确匹配，metadata.source 无 .keyword 子字段）
+            if (docId != null && !docId.trim().isEmpty() 
+            && fileName == null && fileName.trim().isEmpty()
+            && !"by-file-name".equals(docId)) {
+                chunksReq = new co.elastic.clients.elasticsearch.core.SearchRequest.Builder()
+                        .index(finalIndex)
+                        .size(500)
+                        .query(q -> q.bool(b -> b
+                                .must(mq -> mq.term(t -> t
+                                        .field("metadata.doc_id")
+                                        .value(docId)))
+                                .filter(f -> f.term(t -> t
+                                        .field("chunk_granularity")
+                                        .value("coarse")))))
+                        .sort(s -> s.field(f -> f
+                                .field("metadata.chunk_id")
+                                .order(co.elastic.clients.elasticsearch._types.SortOrder.Asc)))
+                        .source(src -> src.fetch(true))
+                        .build();
+            } else if (fileName != null && !fileName.trim().isEmpty()) {
                 chunksReq = new co.elastic.clients.elasticsearch.core.SearchRequest.Builder()
                         .index(finalIndex)
                         .size(500)
                         .query(q -> q.bool(b -> b
                                 .must(mq -> mq.matchPhrase(m -> m
                                         .field("metadata.source")
-                                        .query(finalFileName)))
+                                        .query(fileName)))
                                 .filter(f -> f.term(t -> t
                                         .field("chunk_granularity")
                                         .value("coarse")))))
@@ -818,7 +849,7 @@ public class SearchController {
                         .supplyAsync(() -> {
                             com.boyang.search.security.UserContextHolder.setIdentity(mainThreadIdentity);
                             try {
-                                return searchServiceV2.hybridSearchContext(finalAppCode, finalQueryText,
+                                return searchServiceV2.hybridSearchContextForHome(finalAppCode, finalQueryText,
                                         finalPageSize, finalFilters, "hybrid");
                             } catch (Exception e) {
                                 throw new RuntimeException(e);
@@ -1443,12 +1474,28 @@ public class SearchController {
         Map<String, Object> filtersSnapshot = new LinkedHashMap<>(filters == null
                 ? Collections.emptyMap()
                 : filters);
+        // [性能优化] 首页 keyword 接 Redis 缓存：命中即短路全部 Pipeline（与 /search 一致）。
+        // 复用 SearchCacheService：key 含 aclDigest/policyVersion/userId，PRIVATE/GRANT 自动剔除，
+        // 与普通 /search 安全语义完全一致。开关 search.home.cache.enabled（默认 true）。
+        final boolean cacheEnabled = homeKeywordCacheEnabled;
         return com.boyang.search.util.AsyncContextUtil.supplyAsync(() -> {
             com.boyang.search.security.UserContextHolder.setIdentity(identity);
             try {
+                String cacheKey = null;
+                if (cacheEnabled) {
+                    cacheKey = searchCacheService.buildKey(appCode, queryText, topK, filtersSnapshot, searchMode);
+                    List<Map<String, Object>> cached = searchCacheService.get(cacheKey);
+                    if (cached != null) {
+                        normalizeSearchResultsForFrontend(cached);
+                        return cached;
+                    }
+                }
                 List<Map<String, Object>> results = searchServiceV2.hybridSearchV2(
                         appCode, queryText, topK, filtersSnapshot, searchMode);
                 normalizeSearchResultsForFrontend(results);
+                if (cacheKey != null && results != null && !results.isEmpty()) {
+                    searchCacheService.putAsync(cacheKey, results);
+                }
                 return results == null ? Collections.emptyList() : results;
             } catch (Exception e) {
                 throw new RuntimeException(e);

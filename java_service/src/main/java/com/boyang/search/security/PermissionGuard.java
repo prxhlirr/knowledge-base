@@ -9,6 +9,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.util.*;
+import java.util.stream.Collectors;
+
 import java.util.HashMap;
 import java.util.Map;
 
@@ -197,6 +200,146 @@ public class PermissionGuard {
                 log.warn("[PermGuard] 未识别的 visibility='{}' docId='{}'", vis, doc.getSourceName());
                 return AccessResult.deny("文档权限配置异常，拒绝访问");
         }
+    }
+
+    // ─── 批量权限校验 ─────────────────────────────────────────────────
+
+    /**
+     * [性能优化] 批量权限校验：3 次 SQL 查询替代 N×3 次。
+     * 用于 SearchServiceV2 后置权限过滤，将逐条 canAccess 循环替换为批量操作。
+     * 逻辑与单条 canAccess(sourceName, identity) 完全一致。
+     *
+     * @param sourceNames 待校验的文档 sourceName 列表
+     * @param identity    当前请求的完整用户身份
+     * @return key=sourceName, value=访问判断结果
+     */
+    public Map<String, AccessResult> batchCheck(List<String> sourceNames, JwtVerifier.UserIdentity identity) {
+        Map<String, AccessResult> results = new LinkedHashMap<>();
+
+        if (sourceNames == null || sourceNames.isEmpty()) {
+            return results;
+        }
+
+        // 上帝模式 / 超管：全部放行
+        if (godMode || (identity != null && identity.isSuperAdmin())) {
+            for (String name : sourceNames) {
+                results.put(name, AccessResult.allowAsAdmin());
+            }
+            return results;
+        }
+
+        // 无身份 → 全部当匿名处理
+        if (identity == null) {
+            for (String name : sourceNames) {
+                results.put(name, canAccess(name, (String) null, (String) null));
+            }
+            return results;
+        }
+
+        // 第 1 次查询：批量获取所有文档的注册信息
+        Map<String, KbDocRegistry> docsBySource = registryService.findLatestBySourceNames(sourceNames);
+
+        // 第 2 次查询：批量获取所有文档的 ACL 决策
+        Map<String, KbDocAclSubjectService.Decision> aclDecisions =
+                aclSubjectService.batchDecide(docsBySource, identity, "VIEW");
+
+        // 收集 GRANT 类型的文档，需要第 3 次查询
+        List<String> grantSourceNames = new ArrayList<>();
+        for (Map.Entry<String, KbDocRegistry> entry : docsBySource.entrySet()) {
+            KbDocRegistry doc = entry.getValue();
+            if (doc != null && "GRANT".equalsIgnoreCase(doc.getVisibility())) {
+                grantSourceNames.add(entry.getKey());
+            }
+        }
+
+        // 第 3 次查询（仅 GRANT 文档）：批量检查授权
+        Set<String> grantedSet = Collections.emptySet();
+        if (!grantSourceNames.isEmpty()) {
+            grantedSet = grantsService.batchCheckAccess(grantSourceNames, identity.getUserId());
+        }
+
+        // 在内存中逐条判断（无额外 SQL）
+        String userId = identity.getUserId();
+        String userDeptCode = identity.getDeptCode();
+        Set<String> finalGrantedSet = grantedSet;
+
+        for (String sourceName : sourceNames) {
+            KbDocRegistry doc = docsBySource.get(sourceName);
+
+            // 文档不存在或已删除
+            if (doc == null || "DELETED".equals(doc.getStatus())) {
+                results.put(sourceName, AccessResult.deny("文档不存在或已删除"));
+                continue;
+            }
+
+            // ACL 策略决策（优先于 visibility 兜底）
+            KbDocAclSubjectService.Decision aclDecision = aclDecisions.get(sourceName);
+            if (aclDecision == KbDocAclSubjectService.Decision.DENY) {
+                results.put(sourceName, AccessResult.deny("文档 ACL 策略拒绝访问"));
+                continue;
+            }
+            if (aclDecision == KbDocAclSubjectService.Decision.ALLOW) {
+                results.put(sourceName, AccessResult.allow());
+                continue;
+            }
+
+            // 兼容旧版 visibility 权限模型（与单条 canAccess 逻辑一致）
+            String vis = doc.getVisibility();
+            if (vis == null) vis = "PRIVATE";
+
+            switch (vis.toUpperCase()) {
+                case "PUBLIC":
+                    results.put(sourceName, AccessResult.allow());
+                    break;
+
+                case "INTERNAL":
+                    if (userId == null || userId.trim().isEmpty()) {
+                        results.put(sourceName, AccessResult.deny("该文档需要登录后才能访问（INTERNAL）"));
+                    } else {
+                        results.put(sourceName, AccessResult.allow());
+                    }
+                    break;
+
+                case "DEPT":
+                    if (userId == null || userId.trim().isEmpty()) {
+                        results.put(sourceName, AccessResult.deny("该文档需要登录后才能访问（DEPT）"));
+                        break;
+                    }
+                    String docDept = normalizeDeptCode(doc.getDeptCode());
+                    String userDept = normalizeDeptCode(userDeptCode);
+                    if (docDept == null || userDept == null || docDept.isEmpty()) {
+                        results.put(sourceName, AccessResult.deny("部门信息不完整，无法校验 DEPT 权限"));
+                    } else if (deptTreeService.isSubDept(docDept, userDept)) {
+                        results.put(sourceName, AccessResult.allow());
+                    } else {
+                        results.put(sourceName, AccessResult.deny("您所在部门无权访问此文档（DEPT）"));
+                    }
+                    break;
+
+                case "PRIVATE":
+                    if (doc.getUploaderId() != null && doc.getUploaderId().equals(userId)) {
+                        results.put(sourceName, AccessResult.allow());
+                    } else {
+                        results.put(sourceName, AccessResult.deny("此文档为私有文档，仅上传者本人可访问（PRIVATE）"));
+                    }
+                    break;
+
+                case "GRANT":
+                    if (doc.getUploaderId() != null && doc.getUploaderId().equals(userId)) {
+                        results.put(sourceName, AccessResult.allow());
+                    } else if (finalGrantedSet.contains(sourceName)) {
+                        results.put(sourceName, AccessResult.allow());
+                    } else {
+                        results.put(sourceName, AccessResult.deny("此文档为 GRANT 类型，您未在授权名单中"));
+                    }
+                    break;
+
+                default:
+                    results.put(sourceName, AccessResult.deny("文档权限配置异常，拒绝访问"));
+                    break;
+            }
+        }
+        return results;
     }
 
     // ─── 内部 Token 校验 ─────────────────────────────────────────────

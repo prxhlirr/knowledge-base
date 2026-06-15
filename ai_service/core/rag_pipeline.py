@@ -1510,6 +1510,33 @@ class RAGPipeline:
         except Exception as meta_err:
             print(f"⚠️ [DocMeta] 更新 kb_doc_meta 失败（不影响主索引）: {meta_err}")
 
+        try:
+            self.doc_indexer.update_doc_search(
+                source_name,
+                actions,
+                data_src,
+                content_hash=content_hash,
+                acl_tokens=acl_tokens,
+                doc_id=f"{file_base_hash}_v{new_version}",
+                doc_version=new_version,
+            )
+        except Exception as search_err:
+            print(f"⚠️ [DocSearch] 更新 kb_doc_search 失败，1s 后重试: {search_err}")
+            try:
+                time.sleep(1.0)
+                self.doc_indexer.update_doc_search(
+                    source_name,
+                    actions,
+                    data_src,
+                    content_hash=content_hash,
+                    acl_tokens=acl_tokens,
+                    doc_id=f"{file_base_hash}_v{new_version}",
+                    doc_version=new_version,
+                )
+                print(f"✅ [DocSearch] 重试成功: '{source_name}'")
+            except Exception as retry_err:
+                print(f"❌ [DocSearch] 重试仍失败（不影响主索引）: {retry_err}")
+
         # [C5] 权限事件回调 & [文档注册] 写入 kb_doc_registry
         # [Task 4] 将高延迟的跨服务 HTTP 调用转入后台纯异步线程，防止阻塞主流响应
         def bg_notify_java():

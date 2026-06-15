@@ -46,6 +46,12 @@ public class DocExpansionStep implements SearchPipelineStep {
             return;
         }
 
+        if (context.isHomeLightweightMode()) {
+            context.getTimings().put("doc_expansion_skipped_home", 1);
+            System.out.println("[DocExpansion] skip: home lightweight mode");
+            return;
+        }
+
         List<Map<String, Object>> candidates = context.getCandidateDocs();
         if (candidates == null || candidates.isEmpty())
             return;

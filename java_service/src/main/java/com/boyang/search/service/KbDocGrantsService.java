@@ -122,6 +122,22 @@ public class KbDocGrantsService {
     }
 
     /**
+     * [性能优化] 批量查询多个文档的 GRANT 授权状态。
+     * 用于 PermissionGuard 后置过滤，将 N 次 checkAccess 合并为 1 次 IN 查询。
+     *
+     * @param sourceNames 文档名称列表
+     * @param userId      被授权用户 ID
+     * @return 有有效授权的文档 sourceName 集合
+     */
+    public java.util.Set<String> batchCheckAccess(java.util.List<String> sourceNames, String userId) {
+        if (sourceNames == null || sourceNames.isEmpty() || userId == null) {
+            return java.util.Collections.emptySet();
+        }
+        java.util.List<String> granted = grantsMapper.findGrantedSourceNames(sourceNames, userId);
+        return new java.util.LinkedHashSet<>(granted);
+    }
+
+    /**
      * 查询指定文档的所有有效授权列表（管理端展示）。
      *
      * @param sourceName 文档 source 名称

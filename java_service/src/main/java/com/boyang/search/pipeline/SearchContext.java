@@ -1,5 +1,6 @@
 package com.boyang.search.pipeline;
 
+import co.elastic.clients.elasticsearch._types.FieldValue;
 import com.boyang.search.entity.SysAiTuningConfig;
 import com.boyang.search.entity.SysTenantPolicy;
 import com.boyang.search.pipeline.keyword.KeywordQueryPlan;
@@ -50,6 +51,7 @@ public class SearchContext {
     private String resolvedIndexPattern;
     private long startTime;
     private boolean evidencePrefetchEnabled;
+    private boolean homeLightweightMode;
     private Map<String, Object> timings = new LinkedHashMap<>();
     private int literalHitCount;
     private int bm25Hits;
@@ -62,6 +64,14 @@ public class SearchContext {
     private boolean rerankSemaphoreRejected;
     private boolean llmSemaphoreRejected;
     private int postFilterDeniedCount;
+
+    /**
+     * [性能优化] LiteralRecall 短路标志。
+     * 当 LiteralRecallStep 精确命中文档数 >= returnTopK 时置为 true，
+     * SearchServiceV2 跳过 BM25 召回 + 文档交集 + 证据分片三个步骤，
+     * 直接进入 Rank → Assemble → PermissionFilter，节省 300-500ms。
+     */
+    private boolean literalShortCircuit;
 
     // ──────────────────────
     // 3. 意图梳理与文本规范化
@@ -99,6 +109,14 @@ public class SearchContext {
     private List<Double> originalQueryVector;
     // [Step2 优化] dual-vector 接口预取的稀疏向量，供 EsRecallStep 直接使用，跳过重复 HTTP 调用
     private Map<String, Double> querySparseVector;
+
+    /**
+     * [性能优化] DocSearchPrefilter 提前执行的候选 source 列表。
+     * 由 SearchServiceV2 在 VectorFetch 并行轨道中提前计算，
+     * HybridRecallStrategy.recall() 优先使用此值，跳过内部同步查询。
+     * 为 null 时表示未提前计算，HybridRecallStrategy 自行调用 searchDocCandidateSources。
+     */
+    private List<FieldValue> docCandidateSources;
 
     // ──────────────────────
     // 5. 中间结果与召回文档

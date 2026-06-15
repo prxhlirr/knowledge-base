@@ -5,13 +5,31 @@ import urllib.parse
 from typing import List
 from elasticsearch import Elasticsearch, helpers
 
-from core.indexing.es_setup import INDEX_NAME, QA_INDEX_NAME, DOC_META_WRITE_ALIAS
+from core.indexing.es_setup import INDEX_NAME, QA_INDEX_NAME, DOC_META_WRITE_ALIAS, DOC_SEARCH_WRITE_ALIAS
 
 
 def _default_acl_tokens() -> list[str]:
     raw = os.getenv("KB_DOC_META_DEFAULT_ACL_TOKENS", "_INTERNAL")
     tokens = [token.strip() for token in raw.split(",") if token.strip()]
     return tokens or ["_INTERNAL"]
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [v for v in value if v is not None and str(v).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _add_unique(target: list, value, limit: int = 200):
+    for item in _as_list(value):
+        item = str(item).strip()
+        if item and item not in target:
+            target.append(item)
+            if len(target) >= limit:
+                return
 
 
 class DocIndexer:
@@ -146,3 +164,100 @@ class DocIndexer:
             print(f"  [DocMeta] mark old versions non-latest skipped: {e}")
         self.es.index(index=DOC_META_WRITE_ALIAS, id=meta_es_id, body=body)
         print(f"✅ [DocMeta] {DOC_META_WRITE_ALIAS} 已同步: '{source_name}' ({len(fine_vectors)} fine chunks → doc_vector)")
+
+    def update_doc_search(self, source_name: str, chunk_actions: list,
+                          data_source: str = "document", content_hash: str = None,
+                          acl_tokens: list = None, doc_id: str = None, doc_version: int = None):
+        """Write one compact document-level keyword record."""
+        sources = [a.get("_source", {}) for a in chunk_actions if a.get("_source")]
+        if not sources:
+            print(f"  [DocSearch] '{source_name}' has no chunks, skipped")
+            return
+
+        first_source = sources[0]
+        first_meta = first_source.get("metadata", {}) if isinstance(first_source.get("metadata"), dict) else {}
+        title = first_meta.get("title") or first_source.get("title") or source_name
+        document_number = first_meta.get("document_number") or first_source.get("document_number") or ""
+
+        keywords, tags, section_titles, entities, representative_chunk_ids = [], [], [], [], []
+        term_parts = [source_name, title, document_number]
+        summary_parts = []
+        ordered_sources = sorted(
+            sources,
+            key=lambda src: (
+                0 if src.get("chunk_granularity") == "fine" else 1,
+                -float((src.get("metadata") or {}).get("quality_score") or 0),
+            ),
+        )
+
+        for src in ordered_sources:
+            meta = src.get("metadata", {}) if isinstance(src.get("metadata"), dict) else {}
+            _add_unique(keywords, src.get("keywords"), 300)
+            _add_unique(keywords, meta.get("tags_kw"), 300)
+            _add_unique(tags, meta.get("tags"), 100)
+            _add_unique(tags, meta.get("tags_kw"), 100)
+            _add_unique(section_titles, meta.get("section_path"), 120)
+            _add_unique(entities, meta.get("owner"), 100)
+            _add_unique(entities, meta.get("document_number"), 100)
+            chunk_id = meta.get("chunk_id") or src.get("chunk_id")
+            if chunk_id is not None and len(representative_chunk_ids) < 32:
+                representative_chunk_ids.append(str(chunk_id))
+            content = (src.get("display_content") or src.get("content") or "").strip()
+            if content:
+                if len(summary_parts) < 3:
+                    summary_parts.append(content[:500])
+                if len(term_parts) < 24:
+                    term_parts.append(content[:600])
+
+        doc_terms = " ".join(str(part) for part in term_parts if part)
+        for extra in (keywords[:120], tags[:80], section_titles[:80]):
+            if extra:
+                doc_terms = f"{doc_terms} {' '.join(extra)}".strip()
+
+        search_es_id = urllib.parse.quote(doc_id or content_hash or source_name, safe="")
+        body = {
+            "doc_id": doc_id or "",
+            "doc_version": doc_version,
+            "content_hash": content_hash,
+            "source": source_name,
+            "source_name": source_name,
+            "title": title,
+            "document_number": document_number,
+            "keywords": keywords,
+            "tags": tags,
+            "entities": entities,
+            "section_titles": section_titles,
+            "doc_terms": doc_terms[:12000],
+            "summary": " ".join(summary_parts)[:1500],
+            "representative_chunk_ids": representative_chunk_ids,
+            "doc_type": first_meta.get("doc_type") or "",
+            "data_source": data_source,
+            "chunk_count": len(sources),
+            "is_latest": True,
+            "acl_tokens": acl_tokens or first_meta.get("acl_tokens") or first_source.get("acl_tokens") or _default_acl_tokens(),
+            "visibility": first_meta.get("visibility") or "",
+            "owner_dept_id": first_meta.get("owner_dept_id") or "",
+            "publish_time": first_meta.get("publish_time"),
+            "updated_at": int(time.time() * 1000),
+        }
+        if not body["publish_time"]:
+            body.pop("publish_time", None)
+        try:
+            self.es.update_by_query(
+                index=DOC_SEARCH_WRITE_ALIAS,
+                body={
+                    "script": {"source": "ctx._source.is_latest = false", "lang": "painless"},
+                    "query": {"bool": {"filter": [
+                        {"term": {"source": source_name}},
+                        {"term": {"data_source": data_source}},
+                        *([{"term": {"owner_dept_id": first_meta.get("owner_dept_id")}}]
+                          if first_meta.get("owner_dept_id") else []),
+                    ]}},
+                },
+                conflicts="proceed",
+                refresh=False,
+            )
+        except Exception as e:
+            print(f"  [DocSearch] mark old versions non-latest skipped: {e}")
+        self.es.index(index=DOC_SEARCH_WRITE_ALIAS, id=search_es_id, body=body)
+        print(f"[DocSearch] {DOC_SEARCH_WRITE_ALIAS} synced: '{source_name}' ({len(sources)} chunks -> one doc)")

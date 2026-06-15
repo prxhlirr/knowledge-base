@@ -118,6 +118,75 @@ public class EsRecallUtils {
     }
 
     /**
+     * kb_doc_search_v1 专用权限过滤（顶层字段版本）。
+     *
+     * 与 buildLegacyPermFilter 的区别：
+     *   - 分支A：仅查顶层 acl_tokens（kb_doc_search 无 metadata.acl_tokens）
+     *   - 分支B：使用顶层 visibility / owner_dept_id（非 metadata.* 路径）
+     *   - 不包含 PRIVATE/GRANT 逻辑（kb_doc_search 无 uploader_id/granted_users 字段，
+     *     这类权限完全依赖 acl_tokens 分支A 覆盖）
+     *
+     * @param isAnonymous 是否为匿名用户
+     * @param userId      当前用户 ID
+     * @param deptValues  用户部门编码层级列表
+     * @return ES Filter Query Builder Function
+     */
+    public Function<Query.Builder, ObjectBuilder<Query>> buildDocSearchPermFilter(
+            boolean isAnonymous,
+            String userId,
+            List<FieldValue> deptValues) {
+
+        Set<String> aclTokens = com.boyang.search.security.UserContextHolder.getAclTokens();
+
+        // 超管旁路
+        if (aclTokens.contains("_SUPER_ADMIN")) {
+            return f -> f.matchAll(m -> m);
+        }
+
+        List<FieldValue> tokenValues = new ArrayList<>();
+        for (String token : aclTokens) {
+            tokenValues.add(FieldValue.of(token));
+        }
+
+        return f -> f.bool(mixedBool -> {
+            // 分支A：acl_tokens 交集（顶层字段，kb_doc_search_v1 只有顶层 acl_tokens）
+            mixedBool.should(s -> s.terms(t -> t.field("acl_tokens")
+                .terms(tv -> tv.value(tokenValues))));
+
+            // 分支B：旧数据降级 — 使用顶层 visibility / owner_dept_id
+            mixedBool.should(s -> s.bool(legacyBool -> {
+                legacyBool.mustNot(mn -> mn.exists(e -> e.field("acl_tokens")));
+                legacyBool.must(m -> m.bool(permBool -> {
+                    if (isAnonymous) {
+                        permBool.should(sh -> sh.term(t -> t.field("visibility").value("PUBLIC")));
+                        permBool.should(sh -> sh.bool(b -> b.mustNot(
+                            mn -> mn.exists(e -> e.field("visibility")))));
+                    } else {
+                        permBool.should(sh -> sh.terms(t -> t.field("visibility")
+                            .terms(tv -> tv.value(Arrays.asList(
+                                FieldValue.of("PUBLIC"),
+                                FieldValue.of("INTERNAL"))))));
+                        permBool.should(sh -> sh.bool(b -> b.mustNot(
+                            mn -> mn.exists(e -> e.field("visibility")))));
+                        if (!deptValues.isEmpty()) {
+                            // kb_doc_search 使用 owner_dept_id（顶层字段），而非 metadata.dept_code_full
+                            permBool.should(sh -> sh.terms(t -> t.field("owner_dept_id")
+                                .terms(tv -> tv.value(deptValues))));
+                        }
+                    }
+                    permBool.minimumShouldMatch("1");
+                    return permBool;
+                }));
+                return legacyBool;
+            }));
+
+            // 分支A 或分支B 命中其一即通过
+            mixedBool.minimumShouldMatch("1");
+            return mixedBool;
+        });
+    }
+
+    /**
      * 统一构建最新版本文档的过滤 DSL 条件。
      * 过滤规则：只取 metadata.is_latest = true 的记录，或者兼容该字段完全不存在的历史存量记录。
      * 

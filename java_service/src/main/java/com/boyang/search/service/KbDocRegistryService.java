@@ -37,6 +37,9 @@ public class KbDocRegistryService {
     @Value("${editor.similarity.meta-write-index:kb_doc_meta_write}")
     private String docMetaWriteIndex;
 
+    @Value("${search.doc-search.write-index:${KB_DOC_SEARCH_WRITE_ALIAS:kb_doc_search_write}}")
+    private String docSearchWriteIndex;
+
     /**
      * 注册一个新版本文档。
      * 调用时机：Python rag_pipeline 成功 bulk 写入 ES 后，通过 Java 内部接口回调。
@@ -269,6 +272,23 @@ public class KbDocRegistryService {
             log.warn("[DocRegistry] Meta 同步删除失败 source={} err={}", sourceName, e.getMessage());
         }
 
+        // Step 5: kb_doc_search 同步 — is_latest 置为 false
+        // 匹配字段：source（kb_doc_search 顶层 keyword 字段）
+        // 容错：ES 失败不回滚 MySQL，与 Step2-4 保持一致，记录 warn 日志可补偿
+        try {
+            UpdateByQueryRequest searchReq = UpdateByQueryRequest.of(r -> r
+                .index(docSearchWriteIndex)
+                .query(q -> q.term(t -> t.field("source").value(sourceName)))
+                .script(s -> s.inline(i -> i
+                    .source("ctx._source.is_latest = false")
+                    .lang("painless")))
+                .conflicts(co.elastic.clients.elasticsearch._types.Conflicts.Proceed));
+            esClient.updateByQuery(searchReq);
+            log.info("[DocRegistry] DocSearch 同步删除完成 source={}", sourceName);
+        } catch (Exception e) {
+            log.warn("[DocRegistry] DocSearch 同步删除失败 source={} err={}", sourceName, e.getMessage());
+        }
+
         return true;
     }
 
@@ -315,6 +335,26 @@ public class KbDocRegistryService {
      */
     public KbDocRegistry findLatest(String sourceName) {
         return registryMapper.findLatestBySourceName(sourceName);
+    }
+
+    /**
+     * [性能优化] 批量查询多个文档名的最新版本记录。
+     * 用于 PermissionGuard 后置过滤，将 N 次 findLatest 合并为 1 次 IN 查询。
+     * 返回 Map 方便按 sourceName 快速查找。
+     *
+     * @param sourceNames 文档名称列表
+     * @return key=sourceName, value=对应的最新 KbDocRegistry 记录
+     */
+    public java.util.Map<String, KbDocRegistry> findLatestBySourceNames(java.util.List<String> sourceNames) {
+        if (sourceNames == null || sourceNames.isEmpty()) {
+            return java.util.Collections.emptyMap();
+        }
+        List<KbDocRegistry> docs = registryMapper.findBySourceNames(sourceNames);
+        java.util.Map<String, KbDocRegistry> map = new java.util.LinkedHashMap<>();
+        for (KbDocRegistry doc : docs) {
+            map.putIfAbsent(doc.getSourceName(), doc);
+        }
+        return map;
     }
 
     /**

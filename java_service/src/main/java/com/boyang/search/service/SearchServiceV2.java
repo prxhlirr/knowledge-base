@@ -15,6 +15,7 @@ import com.boyang.search.security.JwtVerifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -49,6 +50,13 @@ public class SearchServiceV2 {
 
     @Autowired
     private EsRecallStep esRecallStep;
+
+    /**
+     * [性能优化] 注入 HybridRecallStrategy，用于在管线并行轨道中提前执行 DocSearchPrefilter。
+     * prefilter 查询（kb_doc_search）不依赖向量编码，可与 VectorFetchStep 并行运行，节省 ~50-200ms。
+     */
+    @Autowired
+    private HybridRecallStrategy hybridRecallStrategy;
 
     @Autowired
     private KeywordDocumentMatchStep keywordDocumentMatchStep;
@@ -108,6 +116,15 @@ public class SearchServiceV2 {
     private QaAnswerProperties qaAnswerProperties;
 
     /**
+     * [性能/可回滚] keyword 模式是否跳过 LiteralRecallStep。
+     * LiteralRecall 对精确文号/文件名做 term 高置信探针；实测（小语料 8k chunk）56/56 零命中，
+     * 纯属 1-2 次 ES 往返的额外延迟。但生产环境若有大量按文号精确检索的流量，跳过会丢失这些高置信命中。
+     * 默认 false（不跳过，保持原行为）——待生产数据用新埋点 literal_recall_ms 确认零命中规律后再开启。
+     */
+    @Value("${search.keyword.literal.skip:false}")
+    private boolean keywordLiteralSkip;
+
+    /**
      * V2 统一搜索主入口（支持三种检索模式）
      *
      * 流程：
@@ -131,7 +148,7 @@ public class SearchServiceV2 {
             int topK,
             Map<String, Object> filters,
             String searchMode) throws Exception {
-        return hybridSearchContext(appCode, queryText, topK, filters, searchMode, false).getFinalResult();
+        return hybridSearchContext(appCode, queryText, topK, filters, searchMode, false, false).getFinalResult();
     }
 
     public SearchContext hybridSearchContext(
@@ -140,7 +157,16 @@ public class SearchServiceV2 {
             int topK,
             Map<String, Object> filters,
             String searchMode) throws Exception {
-        return hybridSearchContext(appCode, queryText, topK, filters, searchMode, true);
+        return hybridSearchContext(appCode, queryText, topK, filters, searchMode, true, false);
+    }
+
+    public SearchContext hybridSearchContextForHome(
+            String appCode,
+            String queryText,
+            int topK,
+            Map<String, Object> filters,
+            String searchMode) throws Exception {
+        return hybridSearchContext(appCode, queryText, topK, filters, searchMode, true, true);
     }
 
     private SearchContext hybridSearchContext(
@@ -149,7 +175,8 @@ public class SearchServiceV2 {
             int topK,
             Map<String, Object> filters,
             String searchMode,
-            boolean enableAnswerQaRecall) throws Exception {
+            boolean enableAnswerQaRecall,
+            boolean homeLightweightMode) throws Exception {
         long startMs = System.currentTimeMillis();
         System.out.println("====== [SearchServiceV2 Pipeline Start] ======");
         aiEngineGateway.clearLlmSemaphoreRejected();
@@ -186,6 +213,7 @@ public class SearchServiceV2 {
         context.setTuningConfig(config);
         context.setStartTime(startMs);
         context.setEvidencePrefetchEnabled(enableAnswerQaRecall);
+        context.setHomeLightweightMode(homeLightweightMode);
         if ("__no_readable_index__".equals(context.getResolvedIndexPattern())) {
             context.setFinalResult(Collections.emptyList());
             context.getTimings().put("index_acl_denied", 1);
@@ -199,46 +227,100 @@ public class SearchServiceV2 {
         // semantic / hybrid 模式需要稠密&稀疏向量，保留 VectorFetchStep。
         // EsRecallStep 内部通过 Strategy Pattern 根据 context.searchMode 选择召回路径。
         final boolean needVector = !"keyword".equals(context.getSearchMode());
-        SearchPipelineStep[] pipeline = needVector
-            ? new SearchPipelineStep[]{
-                queryNormalizeStep,
-                literalRecallStep,
-                vectorFetchStep,   // semantic / hybrid 需要向量
-                esRecallStep,
-                rrfFusionStep,
-                // [TEMP] 普通检索暂时禁用 QA 问答结果进入评分链路
-                // qaInjectionStep,
-                docExpansionStep,
-                rerankStep
-            }
-            : new SearchPipelineStep[]{
-                queryNormalizeStep,
-                literalRecallStep,
-                                   // keyword 模式：跳过 VectorFetchStep
-                esRecallStep,
-                keywordDocumentMatchStep,
-                keywordCoarseEvidenceStep,
-                keywordRankStep,
-                keywordResultAssembleStep
-            };
+
+        // [性能优化] 判断是否需要 DocSearchPrefilter（与 VectorFetch 并行执行的条件）
+        final boolean usePrefilter = needVector && context.isHomeLightweightMode();
 
         log.info("[SearchServiceV2] mode={} needVector={} returnTopK={} recallTopK={} fusionTopK={} rerankTopK={} index={}",
                 context.getSearchMode(), needVector, context.getReturnTopK(), context.getRecallTopK(),
                 context.getFusionTopK(), context.getRerankTopK(), context.getResolvedIndexPattern());
 
-        for (SearchPipelineStep step : pipeline) {
-            long stepStart = System.currentTimeMillis();
-            step.execute(context);
-            long stepMs = System.currentTimeMillis() - stepStart;
-            context.getTimings().put(timingKey(step), stepMs);
-            System.out.println("  [V2-Trace] Step " + step.getClass().getSimpleName()
-                + " finish in " + stepMs + " ms.");
-            if (enableAnswerQaRecall && step == vectorFetchStep) {
+        // ── Phase 1: QueryNormalize (必须先完成，后续步骤依赖 normalizedQuery) ──────────
+        executeStep(queryNormalizeStep, context);
+        if (context.getFinalResult() != null) return context;
+
+        if (needVector) {
+            // ── Phase 2 (hybrid/semantic): VectorFetch ∥ LiteralRecall ∥ DocSearchPrefilter 三路并行 ──
+            // [性能优化] 将三个无依赖的步骤并行执行：
+            //   Track A: VectorFetchStep (~300-600ms) — BGE-M3 向量编码
+            //   Track B: LiteralRecallStep (~50ms) — 精确文号/文件名匹配
+            //   Track C: DocSearchPrefilter (~50-200ms) — kb_doc_search 预过滤查询
+            // 总耗时 = max(A, B, C) 而非 A + B + C，节省 ~300-500ms
+            long parallelStart = System.currentTimeMillis();
+
+            CompletableFuture<Void> vectorFuture = com.boyang.search.util.AsyncContextUtil.supplyAsync(() -> {
+                try {
+                    vectorFetchStep.execute(context);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+                return null;
+            });
+
+            // DocSearchPrefilter 提前执行（原在 HybridRecallStrategy 内部同步执行）
+            if (usePrefilter) {
+                try {
+                    List<co.elastic.clients.elasticsearch._types.FieldValue> candidates =
+                            hybridRecallStrategy.prefilterSources(context);
+                    context.setDocCandidateSources(candidates);
+                } catch (Exception e) {
+                    System.err.println("[V2-Parallel] DocSearchPrefilter failed (will fallback in recall): " + e.getMessage());
+                }
+            }
+
+            // LiteralRecallStep 在当前线程执行（很快 ~50ms）
+            executeStep(literalRecallStep, context);
+
+            // 等待 VectorFetch 完成
+            try {
+                vectorFuture.get(6_000, TimeUnit.MILLISECONDS);
+                context.getTimings().put("vector_fetch_ms", System.currentTimeMillis() - parallelStart);
+            } catch (Exception e) {
+                System.err.println("[V2-Parallel] VectorFetch timed out, continuing with degraded recall");
+                vectorFuture.cancel(true);
+            }
+
+            if (enableAnswerQaRecall) {
                 startAnswerQaRecall(context);
             }
-            if (context.getFinalResult() != null) {
-                break;
+            if (context.getFinalResult() != null) return context;
+
+            // ── Phase 3-6: 顺序执行后续步骤 ──────────────────────────────────────────
+            executeStep(esRecallStep, context);
+            if (context.getFinalResult() != null) return context;
+
+            executeStep(rrfFusionStep, context);
+            // [TEMP] 普通检索暂时禁用 QA 问答结果进入评分链路
+            // executeStep(qaInjectionStep, context);
+            executeStep(docExpansionStep, context);
+            if (context.getFinalResult() != null) return context;
+
+            executeStep(rerankStep, context);
+        } else {
+            // ── keyword 模式：无向量，顺序执行 ─────────────────────────────────────────
+            // [性能/可回滚] LiteralRecall 跳过开关（search.keyword.literal.skip，默认 false）。
+            // 跳过后 fastTrackDocs 为 null → 短路条件不成立 → 走完整 BM25 管道（与 literal 零命中等价）。
+            if (!keywordLiteralSkip) {
+                executeStep(literalRecallStep, context);
+                if (context.getFinalResult() != null) return context;
+
+                // [性能优化] LiteralRecall 短路：精确命中数已覆盖 returnTopK 时，
+                // 跳过 BM25 召回 + 文档交集 + 证据分片三个步骤，节省 300-500ms。
+                if (context.getFastTrackDocs() != null
+                        && context.getFastTrackDocs().size() >= context.getReturnTopK()) {
+                    context.setLiteralShortCircuit(true);
+                    System.out.printf("[SearchServiceV2] Literal short-circuit: %d literal hits >= topK=%d, skipping BM25 pipeline%n",
+                            context.getFastTrackDocs().size(), context.getReturnTopK());
+                }
             }
+
+            if (!context.isLiteralShortCircuit()) {
+                executeStep(esRecallStep, context);
+                executeStep(keywordDocumentMatchStep, context);
+                executeStep(keywordCoarseEvidenceStep, context);
+            }
+            executeStep(keywordRankStep, context);
+            executeStep(keywordResultAssembleStep, context);
         }
         if (enableAnswerQaRecall) {
             collectAnswerQaRecall(context);
@@ -289,6 +371,19 @@ public class SearchServiceV2 {
             auditLog.setRerankSemaphoreRejected(context.isRerankSemaphoreRejected());
             auditLog.setLlmSemaphoreRejected(context.isLlmSemaphoreRejected());
             auditLog.setPostFilterDeniedCount(context.getPostFilterDeniedCount());
+            auditLog.setDocSearchEnabled(timingBool(context, "doc_search_enabled"));
+            auditLog.setDocSearchMs(timingMsAny(context, "doc_search_keyword_ms", "doc_search_prefilter_ms"));
+            auditLog.setDocSearchCandidates(timingMsAny(context, "doc_search_keyword_candidates", "doc_search_prefilter_candidates"));
+            auditLog.setDocSearchPrefilterApplied(timingBool(context, "doc_search_prefilter_applied"));
+            // [验证用] 每步管线耗时落库：把内存 timings map 中未持久化的每步耗时补齐，
+            // 使 total_cost_ms 可被完整分解（residual → ~0），精确定位瓶颈环节。
+            // 注意：keyword 模式下 vector/rerank 为 0；hybrid 模式下 keyword_* 步骤为 0。
+            auditLog.setLiteralRecallMs(timingMs(context, "literal_recall_ms"));
+            auditLog.setKeywordDocMatchMs(timingMs(context, "keyword_doc_match_ms"));
+            auditLog.setCoarseEvidenceMs(timingMs(context, "keyword_coarse_evidence_ms"));
+            auditLog.setKeywordRankMs(timingMs(context, "keyword_rank_ms"));
+            auditLog.setResultAssembleMs(timingMs(context, "keyword_result_assemble_ms"));
+            auditLog.setPermissionFilterMs(timingMs(context, "permission_filter_ms"));
             auditLog.setCreateTime(LocalDateTime.now());
             auditLogService.saveAsync(auditLog);
         } catch (Exception e) {
@@ -369,7 +464,19 @@ public class SearchServiceV2 {
         if (step == keywordCoarseEvidenceStep) return "keyword_coarse_evidence_ms";
         if (step == keywordRankStep) return "keyword_rank_ms";
         if (step == keywordResultAssembleStep) return "keyword_result_assemble_ms";
-        return step.getClass().getSimpleName() + "_ms";
+        return step.getClass().getSimpleName().replace("Step", "").toLowerCase() + "_ms";
+    }
+
+    /**
+     * [性能优化] 执行单个管线步骤并记录耗时（替代原 for 循环中的内联逻辑）。
+     */
+    private void executeStep(SearchPipelineStep step, SearchContext context) throws Exception {
+        long stepStart = System.currentTimeMillis();
+        step.execute(context);
+        long stepMs = System.currentTimeMillis() - stepStart;
+        context.getTimings().put(timingKey(step), stepMs);
+        System.out.println("  [V2-Trace] Step " + step.getClass().getSimpleName()
+                + " finish in " + stepMs + " ms.");
     }
 
     private int timingMs(SearchContext context, String key) {
@@ -378,6 +485,33 @@ public class SearchServiceV2 {
         }
         Object value = context.getTimings().get(key);
         return value instanceof Number ? ((Number) value).intValue() : 0;
+    }
+
+    private int timingMsAny(SearchContext context, String... keys) {
+        if (keys == null) {
+            return 0;
+        }
+        for (String key : keys) {
+            int value = timingMs(context, key);
+            if (value != 0) {
+                return value;
+            }
+        }
+        return 0;
+    }
+
+    private boolean timingBool(SearchContext context, String key) {
+        if (context == null || context.getTimings() == null || key == null) {
+            return false;
+        }
+        Object value = context.getTimings().get(key);
+        if (value instanceof Boolean) {
+            return (Boolean) value;
+        }
+        if (value instanceof Number) {
+            return ((Number) value).intValue() != 0;
+        }
+        return value != null && Boolean.parseBoolean(String.valueOf(value));
     }
 
     /**
@@ -415,23 +549,85 @@ public class SearchServiceV2 {
             return rawResult;
         }
 
-        List<Map<String, Object>> safeResult = new ArrayList<>();
+        // [性能优化] 提取所有 guardKey，尝试批量权限校验
+        List<String> guardKeys = new java.util.ArrayList<>();
+        List<Map<String, Object>> docsToCheck = new java.util.ArrayList<>();
+        int nullKeyCount = 0;
+
+        for (Map<String, Object> doc : rawResult) {
+            String organization = (String) doc.getOrDefault("file_name", doc.getOrDefault("organization", ""));
+            String guardKey = (organization != null && !organization.isEmpty()) ? organization : null;
+            if (guardKey == null) {
+                nullKeyCount++;
+                log.warn("[PostPermFilter] organization/file_name 为空，无法校验权限，拒绝返回 doc_id='{}'",
+                        doc.get("doc_id"));
+            } else {
+                guardKeys.add(guardKey);
+                docsToCheck.add(doc);
+            }
+        }
+
+        List<Map<String, Object>> safeResult = new java.util.ArrayList<>();
+        int deniedCount = nullKeyCount;
+
+        if (!guardKeys.isEmpty()) {
+            try {
+                // 批量权限校验：3 次 SQL 替代 N×3 次
+                java.util.Map<String, PermissionGuard.AccessResult> batchResults =
+                        permissionGuard.batchCheck(guardKeys, identity);
+
+                for (int i = 0; i < docsToCheck.size(); i++) {
+                    String guardKey = guardKeys.get(i);
+                    PermissionGuard.AccessResult ar = batchResults.get(guardKey);
+                    if (ar != null && ar.isAllowed()) {
+                        safeResult.add(docsToCheck.get(i));
+                    } else {
+                        deniedCount++;
+                        log.warn("[PostPermFilter] 幽灵文档已被后置过滤 guardKey='{}' reason='{}' userId='{}'",
+                                guardKey,
+                                ar != null ? ar.getDenyReason() : "batch result missing",
+                                identity != null ? identity.getUserId() : "anonymous");
+                    }
+                }
+            } catch (Exception e) {
+                // 批量查询失败时回退到逐条查询（保证安全兜底）
+                log.warn("[PostPermFilter] 批量权限校验异常，回退逐条查询: {}", e.getMessage());
+                return applyPostPermissionFilterFallback(context, rawResult, identity, guardKeys);
+            }
+        }
+
+        if (deniedCount > 0) {
+            log.warn("[PostPermFilter] ⚠️ 后置过滤拦截了 {} 条文档（ES延迟一致性导致），请排查 acl_tokens 数据质量",
+                     deniedCount);
+        }
+
+        if (context != null) {
+            context.setPostFilterDeniedCount(deniedCount);
+        }
+
+        return safeResult;
+    }
+
+    /**
+     * [性能优化] 批量权限校验失败时的逐条兜底方法（原有逻辑完整保留）。
+     */
+    private List<Map<String, Object>> applyPostPermissionFilterFallback(
+            SearchContext context, List<Map<String, Object>> rawResult,
+            JwtVerifier.UserIdentity identity, List<String> skipKeys) {
+        if (context != null) {
+            context.setPostFilterDeniedCount(0);
+        }
+
+        java.util.Set<String> skipSet = new java.util.HashSet<>(skipKeys != null ? skipKeys : java.util.Collections.emptyList());
+        List<Map<String, Object>> safeResult = new java.util.ArrayList<>();
         int deniedCount = 0;
 
         for (Map<String, Object> doc : rawResult) {
-            // [P0-2 修复] PermissionGuard.canAccess 要求传入的是文档的 sourceName (即文件名)
-            // 在 RerankStep 中，把 metadata.source 映射到了 "organization" 或 "file_name"
             String organization = (String) doc.getOrDefault("file_name", doc.getOrDefault("organization", ""));
-            String docIdHash = (String) doc.get("doc_id");
-
-            // 用 organization(sourceName) 作为权限查询主键
             String guardKey = (organization != null && !organization.isEmpty()) ? organization : null;
 
             if (guardKey == null) {
                 deniedCount++;
-                // 权限校验缺少文档主键时必须 fail-closed，避免无标识结果越权泄露。
-                deniedCount++;
-                log.warn("[PostPermFilter] organization/file_name 为空，无法校验权限，拒绝返回 doc_id='{}'" , docIdHash);
                 continue;
             }
 
@@ -440,16 +636,9 @@ public class SearchServiceV2 {
                 safeResult.add(doc);
             } else {
                 deniedCount++;
-                // deniedCount > 0 说明 ES 权限过滤出现遗漏（幽灵文档），需关注触发修复
-                log.warn("[PostPermFilter] 幽灵文档已被后置过滤 docId='{}' org='{}' reason='{}' userId='{}'",
-                         guardKey, organization, ar.getDenyReason(),
-                         identity != null ? identity.getUserId() : "anonymous");
+                log.warn("[PostPermFilter][Fallback] 幽灵文档已被后置过滤 guardKey='{}' reason='{}'",
+                        guardKey, ar.getDenyReason());
             }
-        }
-
-        if (deniedCount > 0) {
-            log.warn("[PostPermFilter] ⚠️ 后置过滤拦截了 {} 条文档（ES延迟一致性导致），请排查 acl_tokens 数据质量",
-                     deniedCount);
         }
 
         if (context != null) {
