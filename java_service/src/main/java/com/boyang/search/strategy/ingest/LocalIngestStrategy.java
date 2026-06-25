@@ -11,6 +11,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.File;
+import com.boyang.search.service.DocIngestService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
+
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.util.ArrayList;
@@ -19,6 +25,11 @@ import java.util.Map;
 
 @Component
 public class LocalIngestStrategy extends AbstractIngestStrategy {
+
+    @Autowired
+    @Lazy
+    private DocIngestService docIngestService;
+
 
     private static final Logger log = LoggerFactory.getLogger(LocalIngestStrategy.class);
 

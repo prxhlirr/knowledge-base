@@ -149,6 +149,25 @@ public class KeywordResultAssembleStep implements SearchPipelineStep {
                 out.put("chunk_text", buildSnippet(chunkSource, toStringList(evidence.get("matched_terms"))));
                 outputChunks.add(out);
             }
+            // [兜底] 当文档因无 is_latest=true 正文 chunk（如入库卡在未激活态、或仅元数据命中）
+            // 导致 outputChunks 为空时，用 doc-level _source 的 summary/title 合成一段证据，
+            // 保证前端 chunk_text 永不为空。
+            // 根因：Stage-1 读 doc-level(kb_doc_search, is_latest=true) 召回，Stage-2 按
+            //       is_latest=true 回查 kb_document chunk；两层 is_latest 不一致时回查 0 条，
+            //       而文档仍因元数据命中(coversAllTerms)被保留 → chunk_text 变空。
+            if (outputChunks.isEmpty()) {
+                String fallback = buildFallbackSnippet(source, required);
+                if (!fallback.isEmpty()) {
+                    Map<String, Object> fb = new LinkedHashMap<>();
+                    fb.put("chunk_id", docId);
+                    fb.put("chunk_index", Integer.MAX_VALUE);
+                    fb.put("matched_terms", new ArrayList<>(required));
+                    fb.put("chunk_granularity", "fallback");
+                    fb.put("chunk_gran", "fallback");
+                    fb.put("chunk_text", fallback);
+                    outputChunks.add(fb);
+                }
+            }
             result.put("chunks", outputChunks);
             result.put("chunk_text", outputChunks.isEmpty() ? "" : outputChunks.get(0).get("chunk_text"));
             results.add(result);
@@ -242,6 +261,31 @@ public class KeywordResultAssembleStep implements SearchPipelineStep {
             chosen.add(chunks.get(i));
         }
         return chosen;
+    }
+
+    /**
+     * [兜底] 无正文证据(chunk)时，用 doc-level summary/title/source_name/source 生成展示片段，
+     * 避免 chunk_text 为空。仅用于 keyword 模式下 is_latest 不一致或仅元数据命中导致回查为空的场景。
+     */
+    private String buildFallbackSnippet(Map<String, Object> source, Collection<String> terms) {
+        if (source == null) {
+            return "";
+        }
+        String content = stringValue(source.get("summary"));
+        if (content.isEmpty()) {
+            content = stringValue(source.get("title"));
+        }
+        if (content.isEmpty()) {
+            content = stringValue(source.get("source_name"));
+        }
+        if (content.isEmpty()) {
+            content = stringValue(source.get("source"));
+        }
+        if (content.isEmpty()) {
+            return "";
+        }
+        List<String> termList = new ArrayList<>(terms);
+        return highlight(locateSnippet(content, termList), termList);
     }
 
     private String buildSnippet(Map<String, Object> source, List<String> terms) {

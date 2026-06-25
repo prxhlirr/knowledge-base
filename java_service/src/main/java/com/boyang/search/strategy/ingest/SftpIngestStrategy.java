@@ -14,6 +14,11 @@ import org.springframework.util.StreamUtils;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import com.boyang.search.service.DocIngestService;
+import org.springframework.context.annotation.Lazy;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -21,6 +26,11 @@ import java.util.Map;
 
 @Component
 public class SftpIngestStrategy extends AbstractIngestStrategy {
+
+    @Autowired
+    @Lazy
+    private DocIngestService docIngestService;
+
 
     private static final Logger log = LoggerFactory.getLogger(SftpIngestStrategy.class);
     

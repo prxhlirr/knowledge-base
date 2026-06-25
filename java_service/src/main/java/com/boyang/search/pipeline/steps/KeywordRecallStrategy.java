@@ -518,23 +518,22 @@ public class KeywordRecallStrategy implements RecallStrategy {
             co.elastic.clients.elasticsearch._types.query_dsl.Query.Builder m,
             String term) {
         return m.bool(ib -> {
-            ib.should(s -> s.match(mp -> mp.field("doc_terms").query(term).analyzer("ik_max_word").boost(2.0f)));
             ib.should(s -> s.matchPhrase(mp -> mp.field("doc_terms").query(term).slop(0).boost(6.0f)));
-            ib.should(s -> s.match(mp -> mp.field("summary").query(term).analyzer("ik_max_word").boost(1.2f)));
-            ib.should(s -> s.match(mp -> mp.field("title").query(term).analyzer("ik_max_word").boost(10.0f)));
+            ib.should(s -> s.matchPhrase(mp -> mp.field("summary").query(term).slop(0).boost(1.2f)));
+            ib.should(s -> s.matchPhrase(mp -> mp.field("title").query(term).slop(0).boost(10.0f)));
             ib.should(s -> s.term(t -> t.field("title.keyword").value(term).boost(18.0f)));
             ib.should(s -> s.term(t -> t.field("source").value(term).boost(16.0f)));
             if (shouldUseLeadingWildcard(term)) {
-                ib.should(s -> s.match(mp -> mp.field("source.ngram").query(term).boost(5.0f)));
-                ib.should(s -> s.match(mp -> mp.field("title.ngram").query(term).boost(5.0f)));
-                ib.should(s -> s.match(mp -> mp.field("document_number.ngram").query(term).boost(8.0f)));
+                ib.should(s -> s.matchPhrase(mp -> mp.field("source.ngram").query(term).slop(0).boost(5.0f)));
+                ib.should(s -> s.matchPhrase(mp -> mp.field("title.ngram").query(term).slop(0).boost(5.0f)));
+                ib.should(s -> s.matchPhrase(mp -> mp.field("document_number.ngram").query(term).slop(0).boost(8.0f)));
             }
-            ib.should(s -> s.match(mp -> mp.field("document_number.text").query(term).analyzer("ik_max_word").boost(8.0f)));
+            ib.should(s -> s.matchPhrase(mp -> mp.field("document_number.text").query(term).slop(0).boost(8.0f)));
             ib.should(s -> s.term(t -> t.field("document_number").value(term).boost(16.0f)));
             ib.should(s -> s.term(t -> t.field("keywords").value(term).boost(4.0f)));
             ib.should(s -> s.term(t -> t.field("tags").value(term).boost(3.0f)));
             ib.should(s -> s.term(t -> t.field("entities").value(term).boost(3.0f)));
-            ib.should(s -> s.match(mp -> mp.field("section_titles").query(term).analyzer("ik_max_word").boost(3.0f)));
+            ib.should(s -> s.matchPhrase(mp -> mp.field("section_titles").query(term).slop(0).boost(3.0f)));
             return ib.minimumShouldMatch("1");
         });
     }
@@ -543,10 +542,9 @@ public class KeywordRecallStrategy implements RecallStrategy {
             co.elastic.clients.elasticsearch._types.query_dsl.Query.Builder m,
             String term) {
         return m.bool(ib -> {
-            ib.should(s -> s.match(mp -> mp.field("content").query(term).analyzer("ik_max_word")));
             ib.should(s -> s.matchPhrase(mp -> mp.field("content").query(term).slop(0).boost(8.0f)));
-            ib.should(s -> s.match(mp -> mp.field("display_content").query(term).analyzer("ik_max_word").boost(2.0f)));
-            ib.should(s -> s.match(mp -> mp.field("metadata.title").query(term).analyzer("ik_max_word").boost(6.0f)));
+            ib.should(s -> s.matchPhrase(mp -> mp.field("display_content").query(term).slop(0).boost(2.0f)));
+            ib.should(s -> s.matchPhrase(mp -> mp.field("metadata.title").query(term).slop(0).boost(6.0f)));
             ib.should(s -> s.term(t -> t.field("metadata.source").value(term).boost(12.0f)));
             // [性能/可回滚] leading wildcard 默认关闭（search.keyword.legacy-wildcard.enabled=false）。
             // 前缀通配符在亿级 chunk 上是 O(term_dict) 全扫描；新 kb_doc_search 索引已用 ngram 覆盖该需求。
@@ -554,12 +552,12 @@ public class KeywordRecallStrategy implements RecallStrategy {
                 ib.should(s -> s.wildcard(q -> q.field("metadata.source").value("*" + escapeWildcard(term) + "*").caseInsensitive(true).boost(5.0f)));
                 ib.should(s -> s.wildcard(q -> q.field("metadata.document_number").value("*" + escapeWildcard(term) + "*").caseInsensitive(true).boost(6.0f)));
             }
-            ib.should(s -> s.match(mp -> mp.field("doc_title").query(term).analyzer("ik_max_word").boost(6.0f)));
-            ib.should(s -> s.match(mp -> mp.field("metadata.document_number.text").query(term).analyzer("ik_max_word").boost(6.0f)));
+            ib.should(s -> s.matchPhrase(mp -> mp.field("doc_title").query(term).slop(0).boost(6.0f)));
+            ib.should(s -> s.matchPhrase(mp -> mp.field("metadata.document_number.text").query(term).slop(0).boost(6.0f)));
             ib.should(s -> s.term(t -> t.field("metadata.document_number").value(term).boost(10.0f)));
             ib.should(s -> s.term(t -> t.field("keywords").value(term).boost(4.0f)));
             ib.should(s -> s.term(t -> t.field("metadata.tags_kw").value(term).boost(3.0f)));
-            ib.should(s -> s.match(mp -> mp.field("metadata.search_queries").query(term).analyzer("ik_max_word").boost(3.0f)));
+            ib.should(s -> s.matchPhrase(mp -> mp.field("metadata.search_queries").query(term).slop(0).boost(3.0f)));
             return ib.minimumShouldMatch("1");
         });
     }

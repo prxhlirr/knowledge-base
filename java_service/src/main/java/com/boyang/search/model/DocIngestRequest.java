@@ -75,6 +75,12 @@ public class DocIngestRequest {
     /** 来源系统标识（用于审计溯源，如 OA / DMS / ARCHIVE） */
     private String sourceSystem;
 
+    /**
+     * 调用方预算的全文件 SHA-256（full_hash），供 AbstractIngestStrategy 公共管线复用避免重算。
+     * 为空时管线自行流式计算。统一后所有入口以 full_hash 为唯一内容标识。
+     */
+    private String fullHash;
+
     /** 上传者用户 ID（由 Java 服务端从登录 Session 中获取，禁止客户端传入） */
     private String uploaderId;
 

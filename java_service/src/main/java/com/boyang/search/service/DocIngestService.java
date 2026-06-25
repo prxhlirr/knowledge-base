@@ -31,6 +31,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import javax.annotation.PreDestroy;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
 public class DocIngestService {
@@ -54,6 +61,48 @@ public class DocIngestService {
     @org.springframework.beans.factory.annotation.Autowired
     @org.springframework.context.annotation.Lazy
     private DocIngestService self;
+
+    /** 专用并发入库线程池，用于多文件场景并发计算 hash 与上传 MinIO */
+    private final ExecutorService ingestExecutor = new ThreadPoolExecutor(
+            8, 8,
+            60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(),
+            new ThreadFactory() {
+                private final AtomicInteger count = new AtomicInteger(1);
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r);
+                    t.setName("doc-ingest-worker-" + count.getAndIncrement());
+                    t.setDaemon(true);
+                    return t;
+                }
+            }
+    );
+
+    /**
+     * 获取专用并发入库线程池。
+     * @return 线程池实例
+     */
+    public ExecutorService getIngestExecutor() {
+        return this.ingestExecutor;
+    }
+
+    /**
+     * 优雅销毁线程池，防止 JVM 停止时资源泄露。
+     */
+    @PreDestroy
+    public void shutdownExecutor() {
+        log.info("[DocIngestService] 正在优雅关闭 doc-ingest 线程池...");
+        this.ingestExecutor.shutdown();
+        try {
+            if (!this.ingestExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                this.ingestExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            this.ingestExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
 
     private static final String QUEUE_HIGH = "DOC_TASK_QUEUE_HIGH";
     private static final String QUEUE_LOW = "DOC_TASK_QUEUE";
@@ -130,8 +179,15 @@ public class DocIngestService {
                             : Collections.emptyList();
                     List<String> grantedRoles = req.getGrantedRoles() != null ? req.getGrantedRoles() : Collections.emptyList();
                     
-                    // 使用 self 代理调用事务方法，派发到 Redis
-                    self.createAndDispatch(batchId, taskInfos, uploaderId, grantedUsers, grantedRoles, req.isForceOcr());
+                    // [大事务分批重构] 每次以小事务（最多 100 个文件）的形式进行落库和分发
+                    // 理由：高并发或大批导入时，如果单次事务处理数万条记录，会导致连接池被长时间独占、行锁及事务日志暴增
+                    int batchSize = 100;
+                    for (int i = 0; i < taskInfos.size(); i += batchSize) {
+                        int toIndex = Math.min(i + batchSize, taskInfos.size());
+                        List<Map<String, String>> subList = taskInfos.subList(i, toIndex);
+                        // 必须通过 self 代理调用以使其应用各自独立的 @Transactional 事务切面
+                        self.createAndDispatch(batchId, subList, uploaderId, grantedUsers, grantedRoles, req.isForceOcr());
+                    }
                 }
                 log.info("[DocIngest] 异步扫描并派发完成 batchId={} count={}", batchId, taskInfos.size());
             } catch (Exception e) {
@@ -310,12 +366,22 @@ public class DocIngestService {
                 payload.put("publishTime", info.get("publishTime"));
                 payload.put("sourceSystem", info.get("sourceSystem"));
                 payload.put("contentHash", info.getOrDefault("contentHash", ""));
+                // [统一内容标识] full_hash 全文件 SHA-256，由公共管线 processFile 透传，
+                // Python registry 回调时写入 registry.full_hash（全入口统一，不再依赖 Job 对账）
+                payload.put("full_hash", info.getOrDefault("fullHash", ""));
                 // [PDF扫描件] skipFirstPage → skip_pages 整数传给 Python 解析层。
                 // 设计：Java 端用语义化 boolean，Python 端用整数（便于未来扩展为跳 N 页）。
                 int skipPages = "true".equalsIgnoreCase(info.getOrDefault("skipFirstPage", "false")) ? 1 : 0;
                 payload.put("skip_pages", skipPages);
                 payload.put("uploaderId", uploaderId);
                 payload.put("forceOcr", forceOcr);
+                // [第三方文档增量同步] DB_DOC_SYNC 链路设 force_reindex=true，跳过 Python 前 8K dedup。
+                // 根因：Java 用 full_hash 单点去重，Python dedup_checker 用前 8K content_hash 查 ES，
+                //       两者口径不同 → doc 末尾追加内容（前 8K 不变）会被 Python 误判重复 → 静默丢文档。
+                // 修复：增量同步链路绕过 Python dedup，registry.full_hash 为唯一去重判据。
+                //       仅对 DB_DOC_SYNC 生效，不影响上传/批导入的原有 Python dedup。
+                boolean forceReindex = "DB_DOC_SYNC".equals(info.get("sourceSystem"));
+                payload.put("force_reindex", forceReindex);
 
                 String visibility = info.getOrDefault("visibility", "INTERNAL");
                 String deptCode = info.getOrDefault("deptCode", "");

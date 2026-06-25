@@ -79,4 +79,50 @@ public final class ContentHashUtils {
             return "unknown";
         }
     }
+
+    /**
+     * 计算文件【全量字节】的 SHA-256（full_hash），用于第三方文档增量同步的精确对账/去重。
+     * <p>
+     * 与 {@link #compute(byte[])}（前 8K）的区别：
+     *   - 前 8K 是性能优化副产物，对固定模板公文存在前 8K 相同但正文不同的误判风险；
+     *   - full_hash 读全文件，消除模板误判，作为增量同步的权威内容指纹。
+     * <p>
+     * 与 Python 侧约定：Java 端算出 full_hash 后由对账逻辑写入 registry.full_hash，
+     * 不依赖 Python 回传（避免 Python 在预签名 URL 模式下重复下载算 hash）。
+     *
+     * @param path 本地文件路径
+     * @return 全文件 SHA-256 hex 小写；失败返回 "unknown"
+     */
+    public static String computeFull(Path path) {
+        if (path == null) return "unknown";
+        try (java.io.InputStream is = Files.newInputStream(path)) {
+            return computeFull(is);
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+
+    /**
+     * 计算输入流【全量字节】的 SHA-256（full_hash），供回填 Job 从 MinIO 流式下载算 hash。
+     * 注意：调用方负责关闭传入的 InputStream。
+     */
+    public static String computeFull(java.io.InputStream is) {
+        if (is == null) return "unknown";
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] buf = new byte[8192];
+            int read;
+            while ((read = is.read(buf)) > 0) {
+                md.update(buf, 0, read);
+            }
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
 }

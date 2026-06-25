@@ -4,6 +4,7 @@ import com.boyang.search.mapper.KbDocOutboxMapper;
 import com.boyang.search.model.DocIngestRequest;
 import com.boyang.search.security.PermissionGuard;
 import com.boyang.search.service.DocIngestService;
+import com.boyang.search.utils.DocumentTextNormalizer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
@@ -173,7 +174,7 @@ public class DocRegisterController {
         }
 
         String taskId       = (String) body.get("taskId");
-        String sourceName   = (String) body.getOrDefault("sourceName", "");
+        String sourceName   = DocumentTextNormalizer.normalizeFilename((String) body.getOrDefault("sourceName", ""));
         Object versionObj   = body.get("docVersion");
         String fileBaseHash = (String) body.getOrDefault("fileBaseHash", "");
 
@@ -275,6 +276,11 @@ public class DocRegisterController {
                     parseStatus,
                     false
                 );
+                // [统一内容标识] 写 registry.full_hash（Java 公共管线透传的全文件 SHA-256，全入口统一）
+                String fullHash = (String) body.get("fullHash");
+                if (fullHash != null && !fullHash.trim().isEmpty() && !"unknown".equals(fullHash)) {
+                    kbDocRegistryService.updateFullHashBySourceName(sourceName, fullHash);
+                }
                 aclSubjectService.replaceInitialSubjects(
                     registeredDoc,
                     stringList(body.get("grantedUserIds")),

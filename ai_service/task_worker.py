@@ -233,6 +233,8 @@ def main():
                     "grantedRoles": payload.get("grantedRoles", []),
                     "uploader_id": payload.get("uploaderId", ""),
                     "content_hash": payload.get("contentHash"),
+                    # [统一内容标识] full_hash 全文件 SHA-256，透传给 registry 回调写 registry.full_hash
+                    "full_hash": payload.get("full_hash", ""),
                     "task_id": task_id,
                     # [Fix] bg_notify_java() 用 camelCase 读 ext_metadata，以下 key 保持与 Java payload 一致
                     # 根因：上面的 "publish_time"/"document_number" key 与 rag_pipeline 内部读取 key 不匹配，
@@ -246,6 +248,10 @@ def main():
                     # 可选强制 OCR 开关：用于混合文本层/图片层 PDF 或现场已知扫描件。
                     "scanned": _payload_bool(payload.get("scanned", False)),
                     "force_ocr": _payload_bool(payload.get("force_ocr", payload.get("forceOcr", False))),
+                    # [第三方文档增量同步] 透传 force_reindex，供 rag_pipeline.is_duplicate 跳过前8K dedup。
+                    # 根因：Java 用 full_hash 单点去重，Python dedup 用前8K content_hash 查 ES，
+                    #       口径不同会误判重复丢文档；DB_DOC_SYNC 链路强制跳过 Python dedup。
+                    "force_reindex": _payload_bool(payload.get("force_reindex", False)),
                 }
 
                 stats = pipeline.process_and_index(file_path, original_name=original_name, ext_metadata=ext_meta)

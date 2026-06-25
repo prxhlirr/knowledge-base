@@ -45,6 +45,13 @@ public class KbDocRegistry {
     /** 正文前 2000 字 MD5，与 doc_version_history 保持一致，供跨表校验去重 */
     private String contentHash;
 
+    /**
+     * 全文件 SHA-256（full_hash），供第三方文档增量同步精确对账/去重。
+     * 与 contentHash（前 8K）独立，避免污染现有前 8K 去重口径。
+     * 由 Java 侧对账逻辑写入（handler 下载后算），历史数据由 dbFullHashBackfillJob 回填。
+     */
+    private String fullHash;
+
     /** 文件文号（如 国发〔2026〕1号） */
     private String docNumber;
 

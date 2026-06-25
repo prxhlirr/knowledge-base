@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.boyang.search.entity.KbDocRegistry;
 import com.boyang.search.mapper.KbDocRegistryMapper;
+import com.boyang.search.utils.DocumentTextNormalizer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -74,13 +75,14 @@ public class KbDocRegistryService {
             String tags, String publishTime, String visibility,
             String deptCode, String uploaderId, String uploaderName, String parseStatus,
             boolean activateEsImmediately) {
+        final String safeSourceName = DocumentTextNormalizer.normalizeFilename(sourceName);
 
         if (activateEsImmediately) {
             // 旧版回调兼容路径：没有 OutboxPoller 兜底时，仍同步切换 ES 可见版本。
             try {
                 UpdateByQueryRequest esReq = UpdateByQueryRequest.of(r -> r
                         .index(targetIndex != null ? targetIndex : "kb_document")
-                        .query(q -> q.term(t -> t.field("metadata.source").value(sourceName)))
+                        .query(q -> q.term(t -> t.field("metadata.source").value(safeSourceName)))
                         .script(s -> s.inline(i -> i
                                 .source("if (ctx._source.metadata.doc_version != null && ctx._source.metadata.doc_version.toString().equals(params.ver.toString())) {"
                                         +
@@ -108,7 +110,7 @@ public class KbDocRegistryService {
         try {
             UpdateByQueryRequest qaVersionReq = UpdateByQueryRequest.of(r -> r
                     .index("kb_qa_pairs")
-                    .query(q -> q.term(t -> t.field("source").value(sourceName)))
+                    .query(q -> q.term(t -> t.field("source").value(safeSourceName)))
                     .script(s -> s.inline(i -> i
                             .source(
                                 "if (ctx._source.doc_version == null) { return; } " +
@@ -133,7 +135,8 @@ public class KbDocRegistryService {
 
         // 3. 查找是否在 getNextVersion 时已存在其占位草稿
         com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<KbDocRegistry> qw = new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<>();
-        qw.eq(KbDocRegistry::getSourceName, sourceName)
+        registryMapper.markOlderVersionsNotLatest(safeSourceName);
+        qw.eq(KbDocRegistry::getSourceName, safeSourceName)
                 .eq(KbDocRegistry::getDocVersion, docVersion);
         KbDocRegistry entry = registryMapper.selectOne(qw);
 
@@ -143,8 +146,8 @@ public class KbDocRegistryService {
             isUpdate = false;
         }
 
-        entry.setDocId(docId != null ? docId : sourceName + ":" + docVersion);
-        entry.setSourceName(sourceName);
+        entry.setDocId(docId != null ? docId : safeSourceName + ":" + docVersion);
+        entry.setSourceName(safeSourceName);
         entry.setDocVersion(docVersion);
         entry.setIsLatest(1);
         entry.setStoragePath(storagePath);
@@ -402,6 +405,75 @@ public class KbDocRegistryService {
                 .last("LIMIT 1");
         KbDocRegistry found = registryMapper.selectOne(qw);
         return found != null;
+    }
+
+    /**
+     * 检查是否已存在相同全文件哈希（full_hash）的文档。
+     * <p>
+     * 用于第三方文档增量同步的精确去重预查：full_hash 为全文件 SHA-256（非前 8K），
+     * 抗公文固定模板的前 8K 误判。命中即视为内容已入库，跳过 ingest。
+     * <p>
+     * 覆盖历史已入库文档的前提：历史文档的 full_hash 已由 dbFullHashBackfillJob 回填。
+     *
+     * @param fullHash 全文件 SHA-256 hex 小写
+     * @return true 表示已存在相同全文件内容的已激活文档
+     */
+    public boolean existsByFullHash(String fullHash) {
+        if (fullHash == null || fullHash.isEmpty() || "unknown".equals(fullHash))
+            return false;
+        com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<KbDocRegistry> qw = new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<>();
+        qw.eq(KbDocRegistry::getFullHash, fullHash)
+                .eq(KbDocRegistry::getIsLatest, 1)
+                .last("LIMIT 1");
+        return registryMapper.selectOne(qw) != null;
+    }
+
+    /**
+     * 按文档名（source_name）写入全文件哈希到最新版 registry 记录。
+     * <p>
+     * 调用时机：dbDocExtractJob 对账阶段（Part C），文档已被 Python 异步入库（registry 有记录），
+     * Java 侧把下载时算好的 full_hash 写入 registry.full_hash。
+     * <p>
+     * 设计：full_hash 全程 Java 闭环（handler 算 → 映射表存 → 对账写 registry），
+     * 不依赖 Python 回传，避免预签名 URL 模式下 Python 重复下载算 hash，且口径单一。
+     *
+     * @param sourceName 文档名（唯一化后的 {原名}_{hash8}.doc）
+     * @param fullHash   全文件 SHA-256 hex
+     * @return 受影响行数
+     */
+    public int updateFullHashBySourceName(String sourceName, String fullHash) {
+        if (sourceName == null || sourceName.isEmpty() || fullHash == null || fullHash.isEmpty())
+            return 0;
+        com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<KbDocRegistry> uw = new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<>();
+        uw.eq(KbDocRegistry::getSourceName, sourceName)
+                .eq(KbDocRegistry::getIsLatest, 1)
+                .set(KbDocRegistry::getFullHash, fullHash)
+                .set(KbDocRegistry::getUpdatedAt, OffsetDateTime.now());
+        return registryMapper.update(null, uw);
+    }
+
+    /**
+     * 查询 full_hash 为空的历史最新版文档（供 dbFullHashBackfillJob 一次性回填）。
+     * 分批返回（LIMIT 500），回填 Job 可多次触发直至无待回填记录。
+     */
+    public List<KbDocRegistry> findLatestByFullHashNull() {
+        com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<KbDocRegistry> qw = new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<>();
+        qw.isNull(KbDocRegistry::getFullHash)
+                .eq(KbDocRegistry::getIsLatest, 1)
+                .last("LIMIT 500");
+        return registryMapper.selectList(qw);
+    }
+
+    /**
+     * 按主键写入全文件哈希（供 dbFullHashBackfillJob 回填历史文档）。
+     */
+    public int updateFullHashById(Long id, String fullHash) {
+        if (id == null || fullHash == null || fullHash.isEmpty()) return 0;
+        com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<KbDocRegistry> uw = new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<>();
+        uw.eq(KbDocRegistry::getId, id)
+                .set(KbDocRegistry::getFullHash, fullHash)
+                .set(KbDocRegistry::getUpdatedAt, OffsetDateTime.now());
+        return registryMapper.update(null, uw);
     }
 
     /**

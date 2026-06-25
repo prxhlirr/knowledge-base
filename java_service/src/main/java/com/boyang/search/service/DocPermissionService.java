@@ -7,6 +7,7 @@ import com.boyang.search.entity.DocPermissionEvent;
 import com.boyang.search.entity.DocVersionHistory;
 import com.boyang.search.mapper.DocPermissionEventMapper;
 import com.boyang.search.mapper.DocVersionHistoryMapper;
+import com.boyang.search.utils.DocumentTextNormalizer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -56,6 +57,7 @@ public class DocPermissionService extends ServiceImpl<DocPermissionEventMapper, 
     public void recordIngestion(String sourceName, int docVersion, String contentHash,
                                 int chunkCount, String uploaderId,
                                 String visibility, String deptCode) {
+        sourceName = DocumentTextNormalizer.normalizeFilename(sourceName);
         // 幂等保护：同名文档同版本号已存在时跳过插入，避免重复回调触发唯一约束异常
         Integer existingMax = versionMapper.findMaxVersion(sourceName);
         boolean alreadyRecorded = existingMax != null && existingMax >= docVersion;

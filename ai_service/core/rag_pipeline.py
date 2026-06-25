@@ -1598,6 +1598,8 @@ class RAGPipeline:
                     "targetIndex":  target_index,
                     "chunkCount":   len(actions),
                     "contentHash":  content_hash,
+                    # [统一内容标识] full_hash 全文件 SHA-256（Java 公共管线透传），写 registry.full_hash
+                    "fullHash":     ext_metadata.get("full_hash", "") if ext_metadata else "",
                     "docNumber":    ext_metadata.get("docNumber")    if ext_metadata else None,
                     "unit":         ext_metadata.get("unit")         if ext_metadata else None,
                     "tags":         ext_metadata.get("tag")          if ext_metadata else None,

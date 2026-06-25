@@ -360,9 +360,8 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
                         bool.must(m -> m.bool(anyTerm -> {
                             for (String term : terms) {
                                 anyTerm.should(s -> s.bool(oneTerm -> oneTerm
-                                        .should(ss -> ss.match(mp -> mp.field("content").query(term).analyzer("ik_max_word")))
                                         .should(ss -> ss.matchPhrase(mp -> mp.field("content").query(term).slop(0).boost(8.0f)))
-                                        .should(ss -> ss.match(mp -> mp.field("display_content").query(term).analyzer("ik_max_word").boost(2.0f)))
+                                        .should(ss -> ss.matchPhrase(mp -> mp.field("display_content").query(term).slop(0).boost(2.0f)))
                                         .minimumShouldMatch("1")));
                             }
                             return anyTerm.minimumShouldMatch("1");
@@ -411,9 +410,8 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
                         bool.must(m -> m.bool(anyTerm -> {
                             for (String term : terms) {
                                 anyTerm.should(s -> s.bool(oneTerm -> oneTerm
-                                        .should(ss -> ss.match(mp -> mp.field("content").query(term).analyzer("ik_max_word")))
                                         .should(ss -> ss.matchPhrase(mp -> mp.field("content").query(term).slop(0).boost(8.0f)))
-                                        .should(ss -> ss.match(mp -> mp.field("display_content").query(term).analyzer("ik_max_word").boost(2.0f)))
+                                        .should(ss -> ss.matchPhrase(mp -> mp.field("display_content").query(term).slop(0).boost(2.0f)))
                                         .minimumShouldMatch("1")));
                             }
                             return anyTerm.minimumShouldMatch("1");
@@ -660,9 +658,8 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
                     bool.must(m -> m.bool(anyTerm -> {
                         for (String term : terms) {
                             anyTerm.should(s -> s.bool(oneTerm -> oneTerm
-                                .should(ss -> ss.match(mp -> mp.field("content").query(term).analyzer("ik_max_word")))
                                 .should(ss -> ss.matchPhrase(mp -> mp.field("content").query(term).slop(0).boost(8.0f)))
-                                .should(ss -> ss.match(mp -> mp.field("display_content").query(term).analyzer("ik_max_word").boost(2.0f)))
+                                .should(ss -> ss.matchPhrase(mp -> mp.field("display_content").query(term).slop(0).boost(2.0f)))
                                 .minimumShouldMatch("1")
                             ));
                         }
@@ -705,9 +702,8 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
                 b.must(m -> m.bool(anyTerm -> {
                     for (String term : terms) {
                         anyTerm.should(s -> s.bool(oneTerm -> oneTerm
-                            .should(ss -> ss.match(mp -> mp.field("content").query(term).analyzer("ik_max_word")))
                             .should(ss -> ss.matchPhrase(mp -> mp.field("content").query(term).slop(0).boost(8.0f)))
-                            .should(ss -> ss.match(mp -> mp.field("display_content").query(term).analyzer("ik_max_word").boost(2.0f)))
+                            .should(ss -> ss.matchPhrase(mp -> mp.field("display_content").query(term).slop(0).boost(2.0f)))
                             .minimumShouldMatch("1")
                         ));
                     }

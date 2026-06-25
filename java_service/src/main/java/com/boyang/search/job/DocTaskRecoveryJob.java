@@ -5,6 +5,7 @@ import com.boyang.search.entity.SysDocBatch;
 import com.boyang.search.entity.SysDocImportTask;
 import com.boyang.search.service.SysDocBatchService;
 import com.boyang.search.service.SysDocImportTaskService;
+import com.boyang.search.utils.DocumentTextNormalizer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -107,20 +108,9 @@ public class DocTaskRecoveryJob {
 
                 // 步骤 1：重新推入 Redis 队列
                 try {
-                    Map<String, Object> payload = new HashMap<>();
-                    payload.put("taskId",       task.getTaskId());
-                    payload.put("fileCode",     task.getTaskId());
-                    payload.put("filePath",     task.getFilePath());
-                    payload.put("originalName", task.getOriginalName());
-                    payload.put("targetIndex",  defaultTargetIndex);
+                    Map<String, Object> payload = buildRecoveryPayload(task, defaultTargetIndex);
                     // [B-3 修复] visibility 和 deptCode 从数据库读取，不再硬编码 INTERNAL
                     // 防止恢复任务将 DEPT/PRIVATE/GRANT 文档权限静默扩大为 INTERNAL
-                    String origVisibility = task.getVisibility();
-                    payload.put("visibility",
-                        (origVisibility != null && !origVisibility.trim().isEmpty())
-                        ? origVisibility : "INTERNAL");
-                    payload.put("deptCode",
-                        task.getDeptCode() != null ? task.getDeptCode() : "");
                     payload.put("_recovery",    true); // 标记为恢复任务，Python 侧可以据此跳过重复 check
 
                     // [C-2 修复] 不再 new ObjectMapper()，复用注入的全局单例
@@ -138,6 +128,22 @@ public class DocTaskRecoveryJob {
         if (requeuedCount > 0 || timedOutCount > 0) {
             log.info("[Recovery] 本次处理完成 requeued={} timedOut={}", requeuedCount, timedOutCount);
         }
+    }
+
+    static Map<String, Object> buildRecoveryPayload(SysDocImportTask task, String targetIndex) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("taskId",       task.getTaskId());
+        payload.put("fileCode",     task.getTaskId());
+        payload.put("filePath",     task.getFilePath());
+        payload.put("originalName", DocumentTextNormalizer.normalizeFilename(task.getOriginalName()));
+        payload.put("targetIndex",  targetIndex);
+        String origVisibility = task.getVisibility();
+        payload.put("visibility",
+            (origVisibility != null && !origVisibility.trim().isEmpty())
+            ? origVisibility : "INTERNAL");
+        payload.put("deptCode",
+            task.getDeptCode() != null ? task.getDeptCode() : "");
+        return payload;
     }
 
     /**

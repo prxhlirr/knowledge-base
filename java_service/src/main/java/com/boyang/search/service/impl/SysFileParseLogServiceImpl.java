@@ -19,6 +19,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.boyang.search.utils.DocumentTextNormalizer;
 
 @Service
 @Configuration
@@ -115,7 +116,7 @@ public class SysFileParseLogServiceImpl extends ServiceImpl<SysFileParseLogMappe
             payloadMap.put("taskId", fileCode); 
             payloadMap.put("fileCode", fileCode); 
             payloadMap.put("filePath", log.getFilePath());
-            payloadMap.put("originalName", new File(log.getFilePath()).getName());
+            payloadMap.put("originalName", DocumentTextNormalizer.normalizeFilename(new File(log.getFilePath()).getName()));
             
             ObjectMapper mapper = new ObjectMapper();
             String taskPayload = mapper.writeValueAsString(payloadMap);
