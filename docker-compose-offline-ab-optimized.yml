@@ -53,6 +53,8 @@ x-ai-env: &ai-env
   PYTHONIOENCODING: utf-8
   LANG: C.UTF-8
   LC_ALL: C.UTF-8
+  AUTO_BACKFILL_ON_STARTUP: ${AUTO_BACKFILL_ON_STARTUP:-true}
+  BACKFILL_MODE: ${BACKFILL_MODE:-reconcile}
 
 x-ai-common: &ai-common
   image: knowledge-base-ai:1.0.0

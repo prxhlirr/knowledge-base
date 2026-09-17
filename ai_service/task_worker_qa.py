@@ -19,7 +19,7 @@ task_worker_qa.py — 独立 QA 知识库生成 Worker 进程。
     "taskId"     : "uuid",
     "sourceName" : "report.pdf",
     "chunkCount" : 42,
-    "acl_tokens" : ["_INTERNAL"],
+    "acl_tokens" : ["_NO_ACCESS"],
     "finChunks"  : [
       {"chunk_id": "x", "content": "...", "metadata": {...}},
       ...
@@ -36,6 +36,7 @@ import sys
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
+from core.permissions.payload_projection import build_permission_projection_from_payload
 load_dotenv()
 
 REDIS_HOST     = os.getenv("REDIS_HOST", "redis")
@@ -47,7 +48,10 @@ INTERNAL_TOKEN = os.getenv("KB_INTERNAL_TOKEN", "kb-dev-token-change-me-in-prod"
 # QA 专用队列（task_worker 推入，本 Worker 消费）
 QUEUE_QA   = "QUEUE_QA"
 QUEUE_QADL = "QUEUE_QA_DLQ"   # QA 死信队列
+QUEUE_QARETRY = "QUEUE_QA_RETRY"
+DEFAULT_QA_ACL_TOKENS = ["_NO_ACCESS"]
 MAX_RETRY  = 3
+QA_RETRY_DELAY_SECONDS = int(os.getenv("QA_TASK_RETRY_DELAY_SECONDS", "60"))
 
 
 def _make_redis() -> redis.Redis:
@@ -87,6 +91,33 @@ def _init_qa_pipeline():
         raise
 
 
+def enqueue_qa_retry_payload(redis_client, payload: dict, delay_seconds: int = QA_RETRY_DELAY_SECONDS) -> float:
+    """
+    业务功能：把失败的 QA 任务放入 Redis 延迟重试集合。
+    关键流程：计算下一次可重试时间戳，写入 QUEUE_QA_RETRY sorted set。
+    设计原因：QA 生成依赖 LLM/ES，直接 lpush 回 QUEUE_QA 会被当前 Worker 立即再次消费，形成热循环。
+    """
+    retry_at = time.time() + max(0, delay_seconds)
+    redis_client.zadd(QUEUE_QARETRY, {json.dumps(payload, ensure_ascii=False): retry_at})
+    return retry_at
+
+
+def drain_due_qa_retry_payloads(redis_client, now: float | None = None, limit: int = 100) -> int:
+    """
+    业务功能：把到期 QA 重试任务搬回正式 QUEUE_QA 队列。
+    关键流程：按 score 查询到期任务，成功 zrem 后 lpush 回 QUEUE_QA。
+    设计原因：等待和执行解耦，既保留原消费模型，又避免失败任务立刻自旋。
+    """
+    now = time.time() if now is None else now
+    due_items = redis_client.zrangebyscore(QUEUE_QARETRY, 0, now, start=0, num=limit)
+    moved = 0
+    for item in due_items:
+        if redis_client.zrem(QUEUE_QARETRY, item):
+            redis_client.lpush(QUEUE_QA, item)
+            moved += 1
+    return moved
+
+
 def main():
     print("⏳ [QA Worker] 初始化 Redis 客户端...")
     redis_client = _make_redis()
@@ -105,6 +136,7 @@ def main():
 
     while True:
         try:
+            drain_due_qa_retry_payloads(redis_client)
             # 阻塞消费，超时 5s 后循环重试（防止 Redis 连接被 NAT 設备超时关闭）
             result = redis_client.brpop([QUEUE_QA], timeout=5)
             if result is None:
@@ -115,10 +147,12 @@ def main():
             task_id    = payload.get("taskId", "unknown")
             source_name = payload.get("sourceName", "unknown")
             fine_chunks = payload.get("finChunks", [])
-            acl_tokens  = payload.get("acl_tokens", ["_INTERNAL"])
+            acl_tokens  = payload.get("acl_tokens", DEFAULT_QA_ACL_TOKENS)
             file_base_hash = payload.get("fileBaseHash", "")
             # [版本化] 从 payload 提取 doc_version，0 为降级兜底（旧消息无此字段时不影响写入，但 2PC 无法切换旧版）
             doc_version = payload.get("docVersion", 0)
+            target_index = payload.get("targetIndex", "")
+            qa_meta = build_permission_projection_from_payload(payload)
 
             print(f"📋 [QA Worker] 消费任务 taskId={task_id} source={source_name} chunks={len(fine_chunks)}")
 
@@ -134,7 +168,9 @@ def main():
                     source_name=source_name,
                     file_base_hash=file_base_hash,
                     acl_tokens=acl_tokens,
-                    doc_version=doc_version    # [版本化] 透传版本号，写入 ES doc_version 字段
+                    doc_version=doc_version,   # [版本化] 透传版本号，写入 ES doc_version 字段
+                    source_index=target_index,
+                    ext_metadata=qa_meta,
                 )
                 print(f"✅ [QA Worker] 任务完成 taskId={task_id} source={source_name}")
 
@@ -146,8 +182,9 @@ def main():
                 retry_count = payload.get("retryCount", 0)
                 if retry_count < MAX_RETRY:
                     payload["retryCount"] = retry_count + 1
-                    redis_client.lpush(QUEUE_QA, json.dumps(payload, ensure_ascii=False))
-                    print(f"🔄 [QA Worker] 任务重入队，第 {retry_count + 1} 次重试 taskId={task_id}")
+                    payload["lastError"] = str(e)[:500]
+                    retry_at = enqueue_qa_retry_payload(redis_client, payload)
+                    print(f"🔄 [QA Worker] 任务进入延迟重试，第 {retry_count + 1} 次 taskId={task_id} retryAt={int(retry_at)}")
                 else:
                     redis_client.lpush(QUEUE_QADL, json.dumps(payload, ensure_ascii=False))
                     print(f"💀 [QA Worker] 达到最大重试次数({MAX_RETRY})，转入死信队列 taskId={task_id}")

@@ -1,0 +1,348 @@
+{
+  "kb_doc_search_v1": {
+    "kb_doc_search_v1": {
+      "mappings": {
+        "dynamic": "strict",
+        "properties": {
+          "acl_tokens": {
+            "type": "keyword"
+          },
+          "chunk_count": {
+            "type": "integer"
+          },
+          "content": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            },
+            "analyzer": "ik_max_word"
+          },
+          "content_hash": {
+            "type": "keyword"
+          },
+          "data_source": {
+            "type": "keyword"
+          },
+          "doc_id": {
+            "type": "keyword"
+          },
+          "doc_terms": {
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          },
+          "doc_title": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword"
+              }
+            },
+            "analyzer": "ik_max_word"
+          },
+          "doc_type": {
+            "type": "keyword"
+          },
+          "doc_version": {
+            "type": "integer"
+          },
+          "document_number": {
+            "type": "keyword",
+            "fields": {
+              "ngram": {
+                "type": "text",
+                "analyzer": "doc_ngram"
+              },
+              "text": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart"
+              }
+            }
+          },
+          "entities": {
+            "type": "keyword"
+          },
+          "is_latest": {
+            "type": "boolean"
+          },
+          "keywords": {
+            "type": "keyword"
+          },
+          "owner_dept_id": {
+            "type": "keyword"
+          },
+          "publish_time": {
+            "type": "date",
+            "format": "yyyy-MM-dd||epoch_millis"
+          },
+          "representative_chunk_ids": {
+            "type": "keyword"
+          },
+          "section_titles": {
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          },
+          "security_level": {
+            "type": "integer"
+          },
+          "source": {
+            "type": "keyword",
+            "fields": {
+              "ngram": {
+                "type": "text",
+                "analyzer": "doc_ngram"
+              },
+              "text": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart"
+              }
+            }
+          },
+          "source_name": {
+            "type": "keyword"
+          },
+          "summary": {
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          },
+          "tags": {
+            "type": "keyword"
+          },
+          "title": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              },
+              "ngram": {
+                "type": "text",
+                "analyzer": "doc_ngram"
+              }
+            },
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          },
+          "updated_at": {
+            "type": "date",
+            "format": "epoch_millis"
+          },
+          "vector": {
+            "type": "dense_vector",
+            "dims": 1024,
+            "index": true,
+            "similarity": "cosine",
+            "index_options": {
+              "type": "hnsw",
+              "m": 16,
+              "ef_construction": 100
+            }
+          },
+          "visibility": {
+            "type": "keyword"
+          },
+          "visible_depts": {
+            "type": "keyword"
+          }
+        }
+      }
+    }
+  },
+  "kb_document_official": {
+    "kb_document_official": {
+      "mappings": {
+        "properties": {
+          "chunk_granularity": {
+            "type": "keyword"
+          },
+          "colloquial_vector": {
+            "type": "dense_vector",
+            "dims": 1024
+          },
+          "content": {
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          },
+          "content_hash": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "display_content": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "keywords": {
+            "type": "keyword"
+          },
+          "metadata": {
+            "properties": {
+              "access_groups": {
+                "type": "keyword"
+              },
+              "acl_tokens": {
+                "type": "keyword"
+              },
+              "chunk_id": {
+                "type": "integer"
+              },
+              "chunk_type": {
+                "type": "text",
+                "fields": {
+                  "keyword": {
+                    "type": "keyword",
+                    "ignore_above": 256
+                  }
+                }
+              },
+              "data_source": {
+                "type": "keyword"
+              },
+              "dept_code_full": {
+                "type": "keyword"
+              },
+              "dept_l2": {
+                "type": "keyword"
+              },
+              "dept_l4": {
+                "type": "keyword"
+              },
+              "dept_l6": {
+                "type": "keyword"
+              },
+              "dept_l9": {
+                "type": "keyword"
+              },
+              "doc_type": {
+                "type": "text",
+                "fields": {
+                  "keyword": {
+                    "type": "keyword",
+                    "ignore_above": 256
+                  }
+                }
+              },
+              "doc_version": {
+                "type": "integer"
+              },
+              "document_number": {
+                "type": "keyword"
+              },
+              "dynamic_meta": {
+                "type": "object",
+                "dynamic": "false"
+              },
+              "is_latest": {
+                "type": "boolean"
+              },
+              "is_preamble": {
+                "type": "boolean"
+              },
+              "owner": {
+                "type": "keyword"
+              },
+              "owner_dept_id": {
+                "type": "keyword"
+              },
+              "page_end": {
+                "type": "long"
+              },
+              "page_start": {
+                "type": "long"
+              },
+              "parse_status": {
+                "type": "text",
+                "fields": {
+                  "keyword": {
+                    "type": "keyword",
+                    "ignore_above": 256
+                  }
+                }
+              },
+              "publish_time": {
+                "type": "date",
+                "format": "yyyy-MM-dd||epoch_millis"
+              },
+              "quality_score": {
+                "type": "float"
+              },
+              "search_queries": {
+                "type": "text"
+              },
+              "section_path": {
+                "type": "text",
+                "fields": {
+                  "keyword": {
+                    "type": "keyword"
+                  }
+                },
+                "analyzer": "ik_smart"
+              },
+              "source": {
+                "type": "keyword"
+              },
+              "tags": {
+                "type": "text"
+              },
+              "tags_kw": {
+                "type": "keyword"
+              },
+              "title": {
+                "type": "text",
+                "fields": {
+                  "keyword": {
+                    "type": "keyword"
+                  }
+                },
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart"
+              },
+              "updated_by": {
+                "type": "keyword"
+              },
+              "uploader_id": {
+                "type": "keyword"
+              },
+              "version_at": {
+                "type": "date",
+                "format": "epoch_millis"
+              },
+              "visibility": {
+                "type": "keyword"
+              }
+            }
+          },
+          "parent_chunk_id": {
+            "type": "keyword"
+          },
+          "sparse_vector": {
+            "type": "rank_features"
+          },
+          "vector": {
+            "type": "dense_vector",
+            "dims": 1024,
+            "index": true,
+            "similarity": "cosine"
+          }
+        }
+      }
+    }
+  }
+}

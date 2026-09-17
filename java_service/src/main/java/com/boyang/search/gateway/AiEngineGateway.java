@@ -57,6 +57,42 @@ public class AiEngineGateway {
     @Value("${ai.service.llm-acquire-timeout-ms:500}")
     private long llmAcquireTimeoutMs;
 
+    @Value("${ai.service.default-connect-timeout-ms:${AI_DEFAULT_CONNECT_TIMEOUT_MS:3000}}")
+    private String defaultConnectTimeoutMs = "3000";
+
+    @Value("${ai.service.default-read-timeout-ms:${AI_DEFAULT_READ_TIMEOUT_MS:15000}}")
+    private String defaultReadTimeoutMs = "15000";
+
+    @Value("${ai.service.fast-connect-timeout-ms:${AI_FAST_CONNECT_TIMEOUT_MS:3000}}")
+    private String fastConnectTimeoutMs = "3000";
+
+    @Value("${ai.service.fast-read-timeout-ms:${AI_FAST_READ_TIMEOUT_MS:5000}}")
+    private String fastReadTimeoutMs = "5000";
+
+    @Value("${ai.service.llm-connect-timeout-ms:${AI_LLM_CONNECT_TIMEOUT_MS:5000}}")
+    private String llmConnectTimeoutMs = "5000";
+
+    @Value("${ai.service.llm-read-timeout-ms:${AI_LLM_READ_TIMEOUT_MS:60000}}")
+    private String llmReadTimeoutMs = "60000";
+
+    @Value("${ai.service.ltr-connect-timeout-ms:${AI_LTR_CONNECT_TIMEOUT_MS:2000}}")
+    private String ltrConnectTimeoutMs = "2000";
+
+    @Value("${ai.service.ltr-read-timeout-ms:${AI_LTR_READ_TIMEOUT_MS:5000}}")
+    private String ltrReadTimeoutMs = "5000";
+
+    @Value("${ai.service.colbert-connect-timeout-ms:${AI_COLBERT_CONNECT_TIMEOUT_MS:2000}}")
+    private String colbertConnectTimeoutMs = "2000";
+
+    @Value("${ai.service.colbert-read-timeout-ms:${AI_COLBERT_READ_TIMEOUT_MS:5000}}")
+    private String colbertReadTimeoutMs = "5000";
+
+    @Value("${ai.service.sparse-connect-timeout-ms:${AI_SPARSE_CONNECT_TIMEOUT_MS:1500}}")
+    private String sparseConnectTimeoutMs = "1500";
+
+    @Value("${ai.service.sparse-read-timeout-ms:${AI_SPARSE_READ_TIMEOUT_MS:1500}}")
+    private String sparseReadTimeoutMs = "1500";
+
     private RestTemplate defaultRestTemplate; // 3s/15s
     private RestTemplate fastRestTemplate; // 3s/5s （Rewrite/HyDE 合并专用）
     private RestTemplate llmRestTemplate; // 5s/60s （LLM Rerank 长时调用专用）
@@ -83,6 +119,37 @@ public class AiEngineGateway {
     private final java.util.concurrent.ConcurrentHashMap<String, Long> colbertCacheTimes = new java.util.concurrent.ConcurrentHashMap<>();
     private static final long COLBERT_CACHE_TTL_MS = 10 * 60 * 1000L; // 10 minutes
 
+    /**
+     * 业务功能：解析 AI Gateway HTTP 超时配置。
+     * 关键流程：配置缺失、非数字、0 或负数时回退默认值，避免错误环境变量导致服务启动失败或立即超时。
+     *
+     * @param configured 外部配置值
+     * @param defaultValue 默认毫秒数
+     * @return 可安全用于 RestTemplate RequestFactory 的毫秒数
+     */
+    int resolveTimeoutMs(String configured, int defaultValue) {
+        if (configured == null || configured.trim().isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            int value = Integer.parseInt(configured.trim());
+            return value > 0 ? value : defaultValue;
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
+    }
+
+    private SimpleClientHttpRequestFactory requestFactory(
+            String connectTimeout,
+            String readTimeout,
+            int defaultConnectTimeout,
+            int defaultReadTimeout) {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(resolveTimeoutMs(connectTimeout, defaultConnectTimeout));
+        factory.setReadTimeout(resolveTimeoutMs(readTimeout, defaultReadTimeout));
+        return factory;
+    }
+
     @PostConstruct
     public void init() {
         // [操作日志] 创建一个 RestTemplate 拦截器，自动将 MDC 中的 traceId 注入到向上游（AI服务）请求的 Header 中
@@ -98,39 +165,33 @@ public class AiEngineGateway {
             }
         };
 
-        SimpleClientHttpRequestFactory defaultFactory = new SimpleClientHttpRequestFactory();
-        defaultFactory.setConnectTimeout(3000);
-        defaultFactory.setReadTimeout(15000);
+        SimpleClientHttpRequestFactory defaultFactory = requestFactory(
+                defaultConnectTimeoutMs, defaultReadTimeoutMs, 3000, 15000);
         this.defaultRestTemplate = new RestTemplate(defaultFactory);
         this.defaultRestTemplate.getInterceptors().add(traceIdInterceptor);
 
-        SimpleClientHttpRequestFactory fastFactory = new SimpleClientHttpRequestFactory();
-        fastFactory.setConnectTimeout(3000);
-        fastFactory.setReadTimeout(5000);
+        SimpleClientHttpRequestFactory fastFactory = requestFactory(
+                fastConnectTimeoutMs, fastReadTimeoutMs, 3000, 5000);
         this.fastRestTemplate = new RestTemplate(fastFactory);
         this.fastRestTemplate.getInterceptors().add(traceIdInterceptor);
 
-        SimpleClientHttpRequestFactory llmFactory = new SimpleClientHttpRequestFactory();
-        llmFactory.setConnectTimeout(5000);
-        llmFactory.setReadTimeout(60000);
+        SimpleClientHttpRequestFactory llmFactory = requestFactory(
+                llmConnectTimeoutMs, llmReadTimeoutMs, 5000, 60000);
         this.llmRestTemplate = new RestTemplate(llmFactory);
         this.llmRestTemplate.getInterceptors().add(traceIdInterceptor);
 
-        SimpleClientHttpRequestFactory ltrFactory = new SimpleClientHttpRequestFactory();
-        ltrFactory.setConnectTimeout(2000);
-        ltrFactory.setReadTimeout(5000);
+        SimpleClientHttpRequestFactory ltrFactory = requestFactory(
+                ltrConnectTimeoutMs, ltrReadTimeoutMs, 2000, 5000);
         this.ltrRestTemplate = new RestTemplate(ltrFactory);
         this.ltrRestTemplate.getInterceptors().add(traceIdInterceptor);
 
-        SimpleClientHttpRequestFactory colbertFactory = new SimpleClientHttpRequestFactory();
-        colbertFactory.setConnectTimeout(2000);
-        colbertFactory.setReadTimeout(5000);
+        SimpleClientHttpRequestFactory colbertFactory = requestFactory(
+                colbertConnectTimeoutMs, colbertReadTimeoutMs, 2000, 5000);
         this.colbertRestTemplate = new RestTemplate(colbertFactory);
         this.colbertRestTemplate.getInterceptors().add(traceIdInterceptor);
 
-        SimpleClientHttpRequestFactory sparseFactory = new SimpleClientHttpRequestFactory();
-        sparseFactory.setConnectTimeout(1500);
-        sparseFactory.setReadTimeout(1500);
+        SimpleClientHttpRequestFactory sparseFactory = requestFactory(
+                sparseConnectTimeoutMs, sparseReadTimeoutMs, 1500, 1500);
         this.sparseRestTemplate = new RestTemplate(sparseFactory);
         this.sparseRestTemplate.getInterceptors().add(traceIdInterceptor);
 
@@ -884,6 +945,13 @@ public class AiEngineGateway {
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> fetchQaResults(
             List<Double> queryVector, String queryText, String forceSource, int topK) {
+        return fetchQaResults(queryVector, queryText, forceSource, null, topK);
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> fetchQaResults(
+            List<Double> queryVector, String queryText, String forceSource,
+            String readableSourceIndexPattern, int topK) {
         if (queryVector == null || queryVector.isEmpty())
             return new java.util.ArrayList<>();
         try {
@@ -893,6 +961,9 @@ public class AiEngineGateway {
             payload.put("top_k", topK);
             if (forceSource != null && !forceSource.isEmpty()) {
                 payload.put("force_source", forceSource);
+            }
+            if (readableSourceIndexPattern != null && !readableSourceIndexPattern.trim().isEmpty()) {
+                payload.put("readable_source_indexes", readableSourceIndexPattern);
             }
             // [权限对齐] 将当前用户的 ACL Token 集合注入 payload
             // 来源：UserContextHolder.getAclTokens()（由 JwtAuthInterceptor 预计算）
@@ -939,6 +1010,12 @@ public class AiEngineGateway {
      */
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> fetchQaResultsByBm25(String queryText, String forceSource, int topK) {
+        return fetchQaResultsByBm25(queryText, forceSource, null, topK);
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> fetchQaResultsByBm25(
+            String queryText, String forceSource, String readableSourceIndexPattern, int topK) {
         if (queryText == null || queryText.trim().isEmpty())
             return new java.util.ArrayList<>();
         try {
@@ -947,6 +1024,9 @@ public class AiEngineGateway {
             payload.put("top_k", topK);
             if (forceSource != null && !forceSource.isEmpty()) {
                 payload.put("force_source", forceSource);
+            }
+            if (readableSourceIndexPattern != null && !readableSourceIndexPattern.trim().isEmpty()) {
+                payload.put("readable_source_indexes", readableSourceIndexPattern);
             }
             // [权限对齐] BM25 降级路径同样注入 ACL Token，两路权限校验规则保持一致
             java.util.Set<String> aclTokensBm25 = com.boyang.search.security.UserContextHolder.getAclTokens();

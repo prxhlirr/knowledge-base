@@ -36,6 +36,12 @@ import requests
 from datetime import datetime
 from elasticsearch import Elasticsearch
 
+AI_SERVICE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if AI_SERVICE_ROOT not in sys.path:
+    sys.path.insert(0, AI_SERVICE_ROOT)
+
+from core.indexing.es_setup import document_index_settings
+
 # ── 环境变量读取（与 rag_pipeline.py 保持一致）────────────────────────────
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
 ES_USER = os.getenv("ES_USERNAME", "")
@@ -93,15 +99,16 @@ def build_es_client() -> Elasticsearch:
 
 def build_index_mapping() -> dict:
     """
-    构建目标索引的标准 Mapping，与 es_setup.py 中 kb_document_v1 保持完全一致。
-    多分片设置（3 主分片）可在千万级 chunk 规模下提升并行查询性能。
+    业务功能：构建目标分区索引的标准 Mapping。
+    关键流程：分片和副本复用 es_setup.py 的 KB_DOCUMENT_* 配置，避免迁移脚本绕开生产容量规划；
+              迁移专用的 max_result_window 仍保留在本函数中，方便大批量校验和回放。
     """
+    settings = {
+        **document_index_settings(),
+        "index.max_result_window": 50000,
+    }
     return {
-        "settings": {
-            "number_of_shards": 3,     # 多分片提升并行 KNN 查询性能
-            "number_of_replicas": 0,   # 单节点部署，副本设 0 防 yellow
-            "index.max_result_window": 50000,
-        },
+        "settings": settings,
         "mappings": {
             "properties": {
                 "content": {

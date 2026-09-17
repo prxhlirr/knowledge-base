@@ -1,0 +1,42 @@
+{
+  "mode": "execute",
+  "source_index": "kb_document_notice",
+  "target_index": "kb_document_notice_v2",
+  "es_host": "http://localhost:9200",
+  "batch_size": 100,
+  "limit": 0,
+  "sample": 0,
+  "create_target": true,
+  "switch_alias": true,
+  "read_alias": "kb_document",
+  "write_alias": "kb_document_notice_write",
+  "started_at": 1783308831332,
+  "finished_at": 1783308831785,
+  "stats": {
+    "scanned": 0,
+    "dry_run_writes": 0,
+    "written": 0,
+    "failed": 0
+  },
+  "alias_actions": [
+    {
+      "remove": {
+        "index": "kb_document_notice",
+        "alias": "kb_document"
+      }
+    },
+    {
+      "remove": {
+        "index": "kb_document_notice",
+        "alias": "kb_document_notice_write"
+      }
+    },
+    {
+      "add": {
+        "index": "kb_document_notice_v2",
+        "alias": "kb_document_notice_write",
+        "is_write_index": true
+      }
+    }
+  ]
+}

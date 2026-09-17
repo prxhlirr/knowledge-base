@@ -1,0 +1,107 @@
+{
+  "old_count": 669,
+  "new_count": 671,
+  "extra_count": 2,
+  "missing_count": 0,
+  "extra_ids": [
+    "5cd043b9019b39af4af2d7d3f16d5cd8_v1_chunk_0",
+    "5cd043b9019b39af4af2d7d3f16d5cd8_v1_fine_1"
+  ],
+  "missing_ids": [],
+  "extra_docs": [
+    {
+      "id": "5cd043b9019b39af4af2d7d3f16d5cd8_v1_chunk_0",
+      "source": {
+        "acl_tokens": [
+          "_INTERNAL"
+        ],
+        "source_index": "kb_document_official",
+        "visible_unit_codes": [
+          "global"
+        ],
+        "metadata": {
+          "source": "demo_remote_test_document.pdf"
+        }
+      }
+    },
+    {
+      "id": "5cd043b9019b39af4af2d7d3f16d5cd8_v1_fine_1",
+      "source": {
+        "acl_tokens": [
+          "_INTERNAL"
+        ],
+        "source_index": "kb_document_official",
+        "visible_unit_codes": [
+          "global"
+        ],
+        "metadata": {
+          "source": "demo_remote_test_document.pdf"
+        }
+      }
+    }
+  ],
+  "alias_official_docs": 671,
+  "alias_official_internal_docs": 671,
+  "aliases": [
+    {
+      "alias": "kb_document",
+      "index": "kb_document_official_v2",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_official_write",
+      "index": "kb_document_official_v2",
+      "is_write_index": "true"
+    },
+    {
+      "alias": "kb_document",
+      "index": "kb_document_public_v2",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_public_write",
+      "index": "kb_document_public_v2",
+      "is_write_index": "true"
+    },
+    {
+      "alias": "kb_document",
+      "index": "kb_document_news_v2",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_news_write",
+      "index": "kb_document_news_v2",
+      "is_write_index": "true"
+    },
+    {
+      "alias": "kb_document",
+      "index": "kb_document_notice_v2",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_notice_write",
+      "index": "kb_document_notice_v2",
+      "is_write_index": "true"
+    },
+    {
+      "alias": "kb_document",
+      "index": "kb_document_v1",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_v1_write",
+      "index": "kb_document_v1",
+      "is_write_index": "true"
+    },
+    {
+      "alias": "kb_document",
+      "index": "kb_document_law_v2",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_law_write",
+      "index": "kb_document_law_v2",
+      "is_write_index": "true"
+    }
+  ]
+}

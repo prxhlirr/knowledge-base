@@ -28,7 +28,43 @@ AI_HOST       = os.getenv("AI_SERVICE_HOST", "http://127.0.0.1:8001")
 DOC_INDEX     = "kb_document_v1"
 MIN_CHUNK_LEN = 15   # 少于此字数的 chunk 跳过生成
 BATCH_SLEEP_S = 1.5  # 每个 chunk 生成后的限流间隔（秒）
+ALLOW_DEPRECATED_WRITE_ENV = "ALLOW_DEPRECATED_COLLOQUIAL_VECTOR_WRITE"
 # ────────────────────────────────────────────────────────────────────────────
+
+
+def deprecated_write_allowed(args) -> bool:
+    """
+    判断是否允许写入已废弃的 colloquial_vector 字段。
+
+    业务功能：
+      colloquial_vector 主检索链路已废弃，新索引不应继续写入该冗余向量。
+      本脚本保留 dry-run 排查能力，但真实写入必须显式确认，避免运维误执行。
+
+    关键流程：
+      1. dry-run 不写 ES，允许执行；
+      2. 命令行显式传入 --allow-deprecated-colloquial-vector 时允许写入；
+      3. 环境变量 ALLOW_DEPRECATED_COLLOQUIAL_VECTOR_WRITE=true 时允许写入。
+    """
+    if args.dry_run:
+        return True
+    env_value = os.getenv(ALLOW_DEPRECATED_WRITE_ENV, "").strip().lower()
+    return args.allow_deprecated_colloquial_vector or env_value == "true"
+
+
+def stop_if_deprecated_write_not_allowed(args):
+    """
+    在任何 ES 写入前阻断默认执行路径。
+
+    业务功能：
+      防止该历史脚本在没有显式授权时继续生成并写回 colloquial_vector，
+      保证字段优化后不会被旧运维命令重新污染。
+    """
+    if deprecated_write_allowed(args):
+        return
+    print("[BLOCKED] colloquial_vector 已从主检索链路废弃，默认禁止回填写入。")
+    print("   如仅需统计缺口，请使用 --dry-run。")
+    print(f"   如确需临时回填，请显式传 --allow-deprecated-colloquial-vector 或设置 {ALLOW_DEPRECATED_WRITE_ENV}=true。")
+    sys.exit(2)
 
 
 def fetch_fine_chunks_missing_colloquial(es: Elasticsearch, limit: int = None):
@@ -128,7 +164,13 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只统计缺口，不生成")
     parser.add_argument("--limit",  type=int,   default=None, help="最多处理 N 个 chunk")
     parser.add_argument("--sleep",  type=float, default=BATCH_SLEEP_S, help="每 chunk 完成后的限流间隔(秒)")
+    parser.add_argument(
+        "--allow-deprecated-colloquial-vector",
+        action="store_true",
+        help="显式允许写入已废弃的 colloquial_vector 字段"
+    )
     args = parser.parse_args()
+    stop_if_deprecated_write_not_allowed(args)
 
     es = Elasticsearch(ES_HOST)
     if not es.ping():

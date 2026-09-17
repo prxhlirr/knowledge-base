@@ -1,10 +1,9 @@
 package com.boyang.search.service;
 
-import co.elastic.clients.elasticsearch.ElasticsearchClient;
-import co.elastic.clients.elasticsearch.core.UpdateByQueryRequest;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.boyang.search.entity.DocPermissionEvent;
 import com.boyang.search.entity.DocVersionHistory;
+import com.boyang.search.entity.KbDocRegistry;
 import com.boyang.search.mapper.DocPermissionEventMapper;
 import com.boyang.search.mapper.DocVersionHistoryMapper;
 import com.boyang.search.utils.DocumentTextNormalizer;
@@ -14,19 +13,21 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 文档权限事件服务层。
- * 业务功能：管理文档权限变更事件的写入和版本历史记录，以及 ES 权限元数据的同步。
+ * 业务功能：管理文档权限变更事件的写入和版本历史记录，并把权限变更统一交给文档注册中心闭环处理。
  * 关键流程：
  *   1. 入库完成后，Python 侧调用 recordIngestion() 写入版本记录和授权事件。
  *   2. 文档经手时，调用 addHandlerEvent() 追加经手人事件。
  *   3. 可见度变更时，调用 addVisibilityChange()：
  *      - 追加 MySQL 变更事件（审计日志，不可变）
- *      - 同步更新 ES 文档 chunk 中的 metadata.visibility（P0.1 修复）
+ *      - 调用 KbDocRegistryService.updateMeta，重建 ACL subject 并同步 ES 权限投影
  *      - 触发 SearchCacheService 清除相关缓存（P2.11 修复）
- * 设计原则：事件只追加不修改，所有历史均可回溯；ES 和 MySQL 保持最终一致。
+ * 设计原则：事件只追加不修改，所有历史均可回溯；MySQL 是权限权威，ES 只作为可补偿投影。
  */
 @Slf4j
 @Service
@@ -35,11 +36,8 @@ public class DocPermissionService extends ServiceImpl<DocPermissionEventMapper, 
 
     private final DocPermissionEventMapper eventMapper;
     private final DocVersionHistoryMapper  versionMapper;
-    private final ElasticsearchClient      esClient;
     private final SearchCacheService       searchCacheService;
-
-    /** 默认索引模式：改为使用 kb_document 读别名（覆盖所有活跃分区，Reindex 期间不会双命中新旧索引） */
-    private static final String DEFAULT_INDEX_PATTERN = "kb_document";
+    private final KbDocRegistryService     registryService;
 
     /**
      * 文档入库完成后写入版本历史和初始权限事件。
@@ -94,63 +92,54 @@ public class DocPermissionService extends ServiceImpl<DocPermissionEventMapper, 
     }
 
     /**
-     * 变更文档可见度（B-2 修复：ES 同步失败时写入补偿队列，保证最终一致性）。
-     * 核心安全约束：可见度变更必须在 ES 中同步生效，否则搜索层会用旧 visibility 过滤，
-     *              导致用户仍能搜到权限已变更的文档（权限绕过漏洞）。
-     * 修复方案：ES 更新失败时，将补偿任务写入 Redis 队列（es:sync:pending），
-     *           由 EsSyncRetryJob 定时重试，直至 ES 与 MySQL 一致。
+     * 业务功能：变更文档可见度，并复用注册中心的权限闭环。
+     * 关键流程：查询最新版 registry → 校验 DEPT 必备 deptCode → updateMeta → 追加审计事件 → 清缓存。
+     * 设计原因：旧实现只直写 ES metadata.visibility，会绕过 ACL subject、acl_tokens 覆盖投影和单位链同步；
+     *          权限变更必须以 MySQL registry 为权威入口，ES 只能作为最终一致投影。
      */
     @Transactional
-    public void addVisibilityChange(String docId, String newVisibility, String operatorId) {
-        addEvent(docId, "VISIBILITY_CHANGE", "USER", operatorId, operatorId,
-                 "可见度变更 → " + newVisibility);
-        log.info("[Visibility] docId='{}' 变更 → {} by {}", docId, newVisibility, operatorId);
-
-        boolean esOk = false;
-        try {
-            UpdateByQueryRequest esReq = UpdateByQueryRequest.of(r -> r
-                .index(DEFAULT_INDEX_PATTERN)
-                .query(q -> q.term(t -> t.field("metadata.source").value(docId)))
-                .script(s -> s
-                    .inline(i -> i
-                        .lang("painless")
-                        .source("ctx._source.metadata.visibility = params.vis")
-                        .params("vis", co.elastic.clients.json.JsonData.of(newVisibility))
-                    )
-                )
-                .conflicts(co.elastic.clients.elasticsearch._types.Conflicts.Proceed)
-            );
-            co.elastic.clients.elasticsearch.core.UpdateByQueryResponse resp =
-                esClient.updateByQuery(esReq);
-            log.info("[Visibility] ES 同步完成 docId='{}' updated={}", docId, resp.updated());
-            esOk = true;
-        } catch (Exception e) {
-            // [B-2 修复] ES 更新失败时写入 Redis 补偿队列，由定时任务重试（非静默忽略）
-            log.error("[Visibility][B-2] ES 同步失败，写入补偿队列等待重试 docId='{}' err={}", docId, e.getMessage());
+    public void addVisibilityChange(String docId, String newVisibility, String deptCode, String operatorId) {
+        if (docId == null || docId.trim().isEmpty()) {
+            throw new IllegalArgumentException("docId 不能为空");
+        }
+        if (newVisibility == null || newVisibility.trim().isEmpty()) {
+            throw new IllegalArgumentException("visibility 不能为空");
+        }
+        KbDocRegistry doc = registryService.findLatest(docId);
+        if (doc == null || "DELETED".equalsIgnoreCase(doc.getStatus())) {
+            throw new IllegalArgumentException("文档不存在或已删除: " + docId);
         }
 
-        if (!esOk) {
-            // 写入 Redis 补偿队列：key=es:sync:pending，value=JSON
-            try {
-                String pendingPayload = String.format(
-                    "{\"docId\":\"%s\",\"type\":\"VISIBILITY\",\"newValue\":\"%s\",\"ts\":%d}",
-                    docId.replace("\"", "\\\""), newVisibility, System.currentTimeMillis()
-                );
-                searchCacheService.pushEsSyncPending(pendingPayload);
-                log.warn("[Visibility][B-2] 已将 ES 同步任务推入补偿队列 docId='{}'", docId);
-            } catch (Exception queueErr) {
-                // 补偿队列写入也失败时，降级为错误日志报警（人工介入）
-                log.error("[Visibility][B-2][ALERT] 补偿队列写入失败，需人工同步 ES docId='{}' err={}",
-                         docId, queueErr.getMessage());
+        Map<String, String> fields = new HashMap<>();
+        fields.put("visibility", newVisibility.trim().toUpperCase());
+        if (deptCode != null && !deptCode.trim().isEmpty()) {
+            fields.put("deptCode", deptCode.trim());
+        }
+        if ("DEPT".equalsIgnoreCase(newVisibility)) {
+            String finalDeptCode = fields.containsKey("deptCode") ? fields.get("deptCode") : doc.getDeptCode();
+            if (finalDeptCode == null || finalDeptCode.trim().isEmpty()) {
+                throw new IllegalArgumentException("visibility=DEPT 时 deptCode 不能为空");
             }
         }
 
-        // 无论 ES 是否成功，均清除搜索缓存（缓存中旧数据比 ES 不一致问题影响更小）
+        boolean ok = registryService.updateMeta(doc.getId(), fields);
+        if (!ok) {
+            throw new IllegalStateException("文档权限元数据更新失败: " + docId);
+        }
+
+        addEvent(docId, "VISIBILITY_CHANGE", "USER", operatorId, operatorId,
+                 "可见度变更 → " + newVisibility);
+        log.info("[Visibility] docId='{}' 权限闭环变更完成 → {} by {}", docId, newVisibility, operatorId);
+
         try {
             searchCacheService.invalidateByDocSource(docId);
         } catch (Exception e) {
             log.warn("[Visibility] 缓存清除失败 docId='{}' err={}", docId, e.getMessage());
         }
+    }
+
+    public void addVisibilityChange(String docId, String newVisibility, String operatorId) {
+        addVisibilityChange(docId, newVisibility, null, operatorId);
     }
 
 

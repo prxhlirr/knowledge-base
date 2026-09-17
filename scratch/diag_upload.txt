@@ -1,0 +1,39 @@
+======================================================================
+【Stage 4/6】ES: 稿1.docx 的 chunk 是否存在(kb_document, 任意 is_latest)
+======================================================================
+  kb_document 命中 chunk 总数: 17
+    source = '稿1.docx' count = 17
+  is_latest 分布: [{'key': 0, 'key_as_string': 'false', 'doc_count': 17}]
+  样本 chunk _id: d59bbb401d2d78771bfad31384eafea1_v1_chunk_0
+    metadata.source = '稿1.docx' | doc_version = 1 | is_latest = False | gran = coarse | content len = 317
+
+======================================================================
+【doc-level】kb_doc_search / kb_qa_pairs 是否有 稿1
+======================================================================
+  kb_doc_search  命中: 1
+  kb_qa_pairs    命中: 26
+
+======================================================================
+【Stage 3】Redis 队列里是否还有 稿1 待消费任务
+======================================================================
+  DOC_TASK_QUEUE_HIGH len=0  含稿1的任务数=0
+  DOC_TASK_QUEUE     len=0  含稿1的任务数=0
+  DOC_TASK_DLQ       len=0  含稿1的任务数=0
+
+======================================================================
+【Stage 3/5/6】MySQL: task / outbox / registry 状态
+======================================================================
+  sys_doc_import_task: 1 行
+       ('895c46bd-539a-4d89-9f73-daa17de11750', 'INDEXED', '稿1.docx', datetime.datetime(2026, 6, 16, 11, 50, 43, 161000))
+  kb_doc_outbox: 1 行
+       (162, '895c46bd-539a-4d89-9f73-daa17de11750', '稿1.docx', 'WAITING', 0, 0, datetime.datetime(2026, 6, 16, 11, 50, 43, 149000, tzinfo=datetime.timezone(datetime.timedelta(seconds=28800))))
+  kb_doc_registry 查询异常: 错误:  字段 "full_hash" 不存在
+LINE 1: ...ELECT id,source_name,doc_version,is_latest,status,full_hash,...
+                                                             ^
+
+  最近 sys_doc_batch:
+       ('19c99fdf-a2ee-48bb-8063-1b94225004da', 'UPLOAD', 1, 1, 0, 'DONE')
+       ('e3e3edf9-24e4-49f2-973e-3b9758237f1a', 'UPLOAD', 1, 2, 0, 'DONE')
+       ('59f7fc12-76fd-4a71-af2b-727e602fe31d', 'UPLOAD', 1, 1, 0, 'DONE')
+       ('85e657f4-9dca-4fd0-b39f-84e165ac2251', 'UPLOAD', 1, 1, 0, 'DONE')
+       ('efbcb2b8-a9ef-4a8c-a430-86ba5dcec2c8', 'URL', 1, 0, 1, 'DONE')

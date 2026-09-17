@@ -88,6 +88,8 @@ services:
 #       - JAVA_SERVICE_HOST=http://kb-java:8080
 #       - JAVA_API_BASE=http://kb-java:8080/api/v1
 #       - KB_INTERNAL_TOKEN=kb-dev-token-change-me-in-prod
+#       - AUTO_BACKFILL_ON_STARTUP=true
+#       - BACKFILL_MODE=reconcile
 #     depends_on:
 #       - redis_cache
 #       - elasticsearch

@@ -1,0 +1,90 @@
+[
+  {
+    "docs.count": "22",
+    "index": "kb_document_public",
+    "pri": "1",
+    "rep": "0",
+    "status": "open",
+    "store.size": "515.9kb"
+  },
+  {
+    "docs.count": "669",
+    "index": "kb_document_official",
+    "pri": "1",
+    "rep": "0",
+    "status": "open",
+    "store.size": "16mb"
+  },
+  {
+    "docs.count": "13",
+    "index": "kb_doc_meta",
+    "pri": "1",
+    "rep": "1",
+    "status": "open",
+    "store.size": "339kb"
+  },
+  {
+    "docs.count": "444",
+    "index": "kb_qa_pairs_v2",
+    "pri": "1",
+    "rep": "1",
+    "status": "open",
+    "store.size": "9.1mb"
+  },
+  {
+    "docs.count": "0",
+    "index": "kb_document_law",
+    "pri": "1",
+    "rep": "0",
+    "status": "open",
+    "store.size": "139.7kb"
+  },
+  {
+    "docs.count": "6",
+    "index": "kb_doc_meta_v2",
+    "pri": "1",
+    "rep": "0",
+    "status": "open",
+    "store.size": "216kb"
+  },
+  {
+    "docs.count": "22",
+    "index": "kb_doc_search_v1",
+    "pri": "1",
+    "rep": "0",
+    "status": "open",
+    "store.size": "402.3kb"
+  },
+  {
+    "docs.count": "0",
+    "index": "kb_document_notice",
+    "pri": "1",
+    "rep": "0",
+    "status": "open",
+    "store.size": "225b"
+  },
+  {
+    "docs.count": "16",
+    "index": "kb_document_news",
+    "pri": "1",
+    "rep": "0",
+    "status": "open",
+    "store.size": "394.5kb"
+  },
+  {
+    "docs.count": "0",
+    "index": "kb_document_v1",
+    "pri": "1",
+    "rep": "0",
+    "status": "open",
+    "store.size": "225b"
+  },
+  {
+    "docs.count": "444",
+    "index": "kb_qa_pairs",
+    "pri": "1",
+    "rep": "1",
+    "status": "open",
+    "store.size": "9.1mb"
+  }
+]

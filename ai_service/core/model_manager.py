@@ -15,15 +15,35 @@ if sys.platform.startswith("win"):
 
 import math
 import unicodedata
-import numpy as np
 from pathlib import Path
-from transformers import AutoTokenizer
-import onnxruntime
-from onnxruntime.capi.onnxruntime_inference_collection import InferenceSession
 from typing import List, Union
 import time
 import threading
 import gc
+
+np = None
+AutoTokenizer = None
+onnxruntime = None
+InferenceSession = None
+
+def _ensure_model_runtime_loaded():
+    """
+    业务功能：延迟加载模型推理运行时依赖，避免普通 Worker 启动和权限轻路径被重型库拖慢。
+    关键流程：首次真正执行向量化或重排前，才导入 numpy、transformers、onnxruntime，并缓存到模块全局变量。
+    设计原因：权限投影、payload 校验、解析路由不需要模型推理能力，顶层导入重依赖会放大冷启动成本。
+    """
+    global np, AutoTokenizer, onnxruntime, InferenceSession
+    if np is not None and AutoTokenizer is not None and onnxruntime is not None and InferenceSession is not None:
+        return
+    import numpy as _np
+    from transformers import AutoTokenizer as _AutoTokenizer
+    import onnxruntime as _onnxruntime
+    from onnxruntime.capi.onnxruntime_inference_collection import InferenceSession as _InferenceSession
+
+    np = _np
+    AutoTokenizer = _AutoTokenizer
+    onnxruntime = _onnxruntime
+    InferenceSession = _InferenceSession
 
 # ── ES rank_features 合法性校验常量（模块级，只构建一次）────────────────────────
 # ES 8.x rank_features 字段对 key（feature name）的全量禁止字符集：
@@ -78,6 +98,40 @@ def _has_lexical_content(token: str) -> bool:
     """
     return any(unicodedata.category(c)[0] in ('L', 'N') for c in token)
 
+
+def _parse_positive_int(raw_value, default: int, min_value: int = 1, max_value: int = None) -> int:
+    """
+    业务功能：解析模型窗口相关的正整数配置。
+    关键流程：空值、非法整数、低于下限或高于上限时回退到默认值。
+    设计原因：模型管理器属于进程启动关键路径，配置错误不能让服务在导入阶段崩溃。
+    """
+    if raw_value is None or str(raw_value).strip() == "":
+        return default
+    try:
+        value = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        return default
+    if value < min_value:
+        return default
+    if max_value is not None and value > max_value:
+        return default
+    return value
+
+
+def resolve_embedding_max_len(embedding_max_len=None, max_chunk_size=None) -> int:
+    """
+    业务功能：统一解析 embedding tokenizer 的最大窗口。
+    关键流程：优先使用 EMBEDDING_MAX_LEN 显式配置；未配置时根据 MAX_CHUNK_SIZE 兼容推导。
+    设计原因：实际 chunk 策略最大可到 500 字，默认 512 token 容易静默截断，生产默认应覆盖当前策略上限。
+    """
+    explicit = _parse_positive_int(embedding_max_len, 0, min_value=128, max_value=8192)
+    if explicit:
+        return explicit
+
+    chunk_size = _parse_positive_int(max_chunk_size, 500, min_value=1, max_value=100000)
+    return 512 if chunk_size <= 300 else 1024
+
+
 class ModelManager:
     """管理 BGE-m3 等编码模型的单例类 (GPU 优先 + CPU 自动回退版)"""
     _instance = None
@@ -105,12 +159,12 @@ class ModelManager:
             cls._instance.tokenizer_dir = base_model_path / "bge-m3"
             cls._instance.reranker_tokenizer_dir = base_model_path / "bge-reranker-v2-m3"
             
-            # [Fix-D] max_len 动态对齐 MAX_CHUNK_SIZE 环境变量，消除大 chunk 的语义盲区。
-            # 根因：coarse chunk 最大 500 字 ≈ 750 tokens，被截断至前 340 字（512 token≈340汉字），
-            #       后 160 字进入 BM25 content 字段但不进向量，形成"BM25 全文/KNN 仅首段"的语义盲区。
-            # 修复：chunk 大时自动扩 max_len 至 1024（≈700汉字），覆盖 500 字 coarse chunk 全文。
-            _max_chunk = int(os.getenv('MAX_CHUNK_SIZE', '300'))
-            cls._instance.max_len = 512 if _max_chunk <= 300 else 1024
+            # [P1] embedding 窗口优先由 EMBEDDING_MAX_LEN 显式控制，未配置时按当前 chunk 策略默认 500 字推导为 1024。
+            # 根因：文档类型策略最大 chunk 已到 500 字，旧默认 MAX_CHUNK_SIZE=300 会让 max_len=512 并静默截断长 chunk。
+            cls._instance.max_len = resolve_embedding_max_len(
+                os.getenv("EMBEDDING_MAX_LEN"),
+                os.getenv("MAX_CHUNK_SIZE"),
+            )
             # Reranker 独立 max_len；文档相似度场景需要更长上下文，离线部署可通过环境变量调优。
             cls._instance.rerank_max_len = int(os.getenv("RERANK_MAX_LEN", "512"))
             cls._instance.device = "cpu"
@@ -162,6 +216,7 @@ class ModelManager:
         return max(0.0, time.time() - self.last_used_at)
 
     def _new_session_options(self):
+        _ensure_model_runtime_loaded()
         sess_options = onnxruntime.SessionOptions()
         sess_options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
         sess_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -220,6 +275,7 @@ class ModelManager:
         return self._cpu_only_reranker_session
 
     def _provider_pair(self):
+        _ensure_model_runtime_loaded()
         sess_options = self._new_session_options()
         available_providers = onnxruntime.get_available_providers()
         print(f"🔍 Available ORT Providers: {available_providers}")
@@ -327,6 +383,7 @@ class ModelManager:
     def load_model(self):
 
         """加载模型：自动探明运行环境 (CUDA/DML/CPU) 并分配算力，int8失败时回退fp32保持GPU"""
+        _ensure_model_runtime_loaded()
         start_load = time.time()
         
         device_id = int(os.getenv("ORT_CUDA_DEVICE_ID", 0))
@@ -405,6 +462,7 @@ class ModelManager:
             print(f"✨ Initialization finished in {int((time.time() - start_load)*1000)}ms")
 
     def _load_session_with_fallback(self, path_int8, path_fp32, providers, sess_options, label):
+        _ensure_model_runtime_loaded()
         """
         业务功能：带分级回退的 ONNX 模型会话加载器
         关键流程：
@@ -473,6 +531,67 @@ class ModelManager:
             # 避免首次真实请求 (5 docs) 触发 CUDA 重新分配，消除 5-10s 冷启动
             warmup_docs = ["预热文档：" + "测试内容" * 20] * 5
             self.rerank("预热查询：商事调解相关政策规定", warmup_docs)
+
+    def ensure_embedding_tokenizer_loaded(self):
+        """
+        业务功能：只加载 embedding tokenizer，不提前加载 ONNX 模型权重。
+        关键流程：复用延迟运行时加载逻辑，若 tokenizer 为空则从本地模型目录加载 AutoTokenizer。
+        设计原因：入库前需要统计 token 截断风险，但统计不应额外占用模型推理内存。
+        """
+        if self.tokenizer is not None:
+            return
+        with self._embedding_load_lock:
+            if self.tokenizer is not None:
+                return
+            _ensure_model_runtime_loaded()
+            self.tokenizer = AutoTokenizer.from_pretrained(str(self.tokenizer_dir.absolute()))
+
+    def embedding_token_stats(self, texts: Union[List[str], str]) -> dict:
+        """
+        业务功能：统计待向量化文本的 tokenizer 长度和潜在截断比例。
+        关键流程：按小批量使用 embedding tokenizer 做不截断编码，计算最大/平均 token 数以及超过 max_len 的文本数量。
+        设计原因：chunk 字符数和 tokenizer token 数不是一回事，生产环境必须显式暴露截断风险才能定位召回盲区。
+        """
+        if isinstance(texts, str):
+            texts = [texts]
+        texts = [text or "" for text in texts]
+        total = len(texts)
+        max_len = int(getattr(self, "max_len", 512) or 512)
+        if total == 0:
+            return {
+                "text_count": 0,
+                "max_len": max_len,
+                "max_tokens": 0,
+                "avg_tokens": 0.0,
+                "truncated_count": 0,
+                "truncated_ratio": 0.0,
+            }
+
+        self.ensure_embedding_tokenizer_loaded()
+        batch_size = int(os.getenv("EMBEDDING_TOKEN_STATS_BATCH_SIZE", "256"))
+        batch_size = max(batch_size, 1)
+        lengths = []
+        for start in range(0, total, batch_size):
+            batch = texts[start:start + batch_size]
+            encoded = self.tokenizer(
+                batch,
+                padding=False,
+                truncation=False,
+                add_special_tokens=True,
+            )
+            lengths.extend(len(ids) for ids in encoded.get("input_ids", []))
+
+        max_tokens = max(lengths) if lengths else 0
+        truncated_count = sum(1 for length in lengths if length > max_len)
+        avg_tokens = float(sum(lengths)) / float(total) if total else 0.0
+        return {
+            "text_count": total,
+            "max_len": max_len,
+            "max_tokens": int(max_tokens),
+            "avg_tokens": round(avg_tokens, 2),
+            "truncated_count": int(truncated_count),
+            "truncated_ratio": round(float(truncated_count) / float(total), 4),
+        }
 
     def encode(self, texts: Union[List[str], str]) -> List[List[float]]:
         """执行稠密向量编码"""
@@ -916,6 +1035,7 @@ class ModelManager:
             "reranker_device": getattr(self, "reranker_device", "CPU"),
             "providers": self.model.get_providers() if getattr(self, "model", None) else [],
             "reranker_providers": self.reranker.get_providers() if getattr(self, "reranker", None) else [],
+            "embedding_max_len": getattr(self, "max_len", 512),
             "rerank_max_len": getattr(self, "rerank_max_len", 256),
             "reranker_model_path": str(getattr(self, "reranker_path", "")),
             "reranker_int8_model_path": str(getattr(self, "int8_reranker_path", "")),

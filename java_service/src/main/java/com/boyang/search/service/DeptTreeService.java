@@ -302,6 +302,7 @@ public class DeptTreeService {
         nodes.add(new DeptNode("62",     "甘肃省",   null));
         nodes.add(new DeptNode("6201",   "兰州市",   "62"));
         nodes.add(new DeptNode("620102", "城关区",   "6201"));
+        nodes.add(new DeptNode("620102900000", "光武门",   "620102"));
         nodes.add(new DeptNode("620103", "七里河区", "6201"));
         nodes.add(new DeptNode("6202",   "嘉峪关市", "62"));
         nodes.add(new DeptNode("IT-001", "信息化处", null));  // 非行政编码

@@ -5,6 +5,49 @@ from elasticsearch import Elasticsearch, helpers
 
 load_dotenv()
 
+
+def _env_int(name: str, default: int, min_value: int = 0) -> int:
+    """
+    业务功能：读取独立向量索引的整数型容量配置。
+    关键流程：向量存储可能被本地脚本单独调用，不能依赖 ES 默认 settings；非法配置回退默认值。
+    """
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        print(f"[VectorStore] env {name}={raw!r} is not an integer, fallback to {default}")
+        return default
+    if value < min_value:
+        print(f"[VectorStore] env {name}={value} is lower than {min_value}, fallback to {default}")
+        return default
+    return value
+
+
+def vector_store_index_settings() -> dict:
+    """
+    业务功能：生成独立向量索引 settings。
+    关键流程：通过环境变量控制分片和副本，避免本地工具在生产 ES 上静默创建固定 1/1 索引。
+    """
+    return {
+        "number_of_shards": _env_int("KB_VECTOR_STORE_SHARDS", 1, min_value=1),
+        "number_of_replicas": _env_int("KB_VECTOR_STORE_REPLICAS", 0, min_value=0),
+    }
+
+
+def vector_store_hnsw_options() -> dict:
+    """
+    业务功能：生成独立向量索引的 HNSW 参数。
+    关键流程：亿级向量场景下 m/ef_construction 直接影响内存和构建成本，必须可按环境压测调优。
+    """
+    return {
+        "type": "hnsw",
+        "m": _env_int("KB_VECTOR_STORE_HNSW_M", 16, min_value=1),
+        "ef_construction": _env_int("KB_VECTOR_STORE_HNSW_EF_CONSTRUCTION", 128, min_value=1),
+    }
+
+
 class BaseVectorStore(abc.ABC):
     """向量存储接口抽象层，为后期独立扩展 Milvus/Qdrant 预留标准化协议"""
     
@@ -33,10 +76,7 @@ class EsVectorStore(BaseVectorStore):
             return
             
         mapping_body = {
-            "settings": {
-                "number_of_shards": 1, 
-                "number_of_replicas": 1
-            },
+            "settings": vector_store_index_settings(),
             "mappings": {
                 "properties": {
                     # 1. 向量场
@@ -45,11 +85,7 @@ class EsVectorStore(BaseVectorStore):
                         "dims": 1024, # BGE-m3 输出1024维
                         "index": True,
                         "similarity": "cosine",
-                        "index_options": {
-                            "type": "hnsw",
-                            "m": 16,
-                            "ef_construction": 128
-                        }
+                        "index_options": vector_store_hnsw_options()
                     },
                     # 2. 标量字段与元数据
                     "doc_id": { "type": "keyword" },

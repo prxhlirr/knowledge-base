@@ -5,6 +5,7 @@ import com.boyang.search.pipeline.SearchContext;
 import com.boyang.search.pipeline.SearchPipelineStep;
 import com.boyang.search.pipeline.keyword.KeywordQueryPlanner;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -28,6 +29,13 @@ public class QueryNormalizeStep implements SearchPipelineStep {
 
     @Autowired
     private KeywordQueryPlanner keywordQueryPlanner;
+
+    /**
+     * 业务功能：控制 Python NLP normalize 的等待时间。
+     * 设计原因：归一化位于检索入口，必须允许生产环境按 AI 服务延迟和搜索 SLA 调整等待预算。
+     */
+    @Value("${search.query-normalize.timeout-ms:${SEARCH_QUERY_NORMALIZE_TIMEOUT_MS:3000}}")
+    private String queryNormalizeTimeoutMs = "3000";
 
     // 意图判断：疑问词/逻辑关系字眼
     private static final Pattern INTENT_PATTERN = Pattern.compile(
@@ -96,9 +104,10 @@ public class QueryNormalizeStep implements SearchPipelineStep {
                     .supplyAsync(() -> aiEngineGateway.normalizeQuery(queryText));
             Map<String, String> normData;
             try {
-                normData = normFuture.get(3, TimeUnit.SECONDS);
+                normData = normFuture.get(resolveQueryNormalizeTimeoutMs(), TimeUnit.MILLISECONDS);
             } catch (Exception e) {
                 System.err.println("[QueryNormalizeStep] Timeout/Error in normalization. Using fallback.");
+                normFuture.cancel(true);
                 normData = new java.util.HashMap<>();
                 normData.put("normalized", fullWidthToHalf(queryText));
                 normData.put("pinyin", "");
@@ -162,6 +171,22 @@ public class QueryNormalizeStep implements SearchPipelineStep {
         // [短语拦截熔断机制]
         boolean circuitBreakerEnabled = Boolean.TRUE.equals(context.getTuningConfig().getCircuitBreakerEnabled());
         context.setSkipEmbedding(circuitBreakerEnabled);
+    }
+
+    int resolveQueryNormalizeTimeoutMs() {
+        return resolvePositiveTimeoutMs(queryNormalizeTimeoutMs, 3000);
+    }
+
+    int resolvePositiveTimeoutMs(String configured, int defaultValue) {
+        if (configured == null) {
+            return defaultValue;
+        }
+        try {
+            int parsed = Integer.parseInt(configured.trim());
+            return parsed > 0 ? parsed : defaultValue;
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
     }
 
     /**

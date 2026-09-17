@@ -6,9 +6,12 @@ import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
 import co.elastic.clients.elasticsearch._types.query_dsl.BoolQuery;
+import com.boyang.search.entity.SysTenantPolicy;
+import com.boyang.search.pipeline.steps.EsRecallUtils;
 import com.boyang.search.security.JwtVerifier;
 import com.boyang.search.security.PermissionGuard;
 import com.boyang.search.security.UserContextHolder;
+import com.boyang.search.util.AsyncContextUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -20,6 +23,7 @@ import org.springframework.web.client.RestTemplate;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -41,6 +45,15 @@ public class SimilarityService {
 
     @Autowired
     private PermissionGuard permissionGuard;
+
+    @Autowired
+    private SysTenantPolicyService sysTenantPolicyService;
+
+    @Autowired
+    private SearchIndexResolver searchIndexResolver;
+
+    @Autowired
+    private EsRecallUtils esRecallUtils;
 
     @Autowired(required = false)
     private StringRedisTemplate redisTemplate;
@@ -72,6 +85,15 @@ public class SimilarityService {
     @Value("${editor.similarity.chunk-fallback-index:kb_document}")
     private String editorSimilarityChunkFallbackIndex;
 
+    @Value("${editor.similarity.doc-search-enabled:true}")
+    private boolean editorSimilarityDocSearchEnabled;
+
+    @Value("${editor.similarity.doc-search-index:${search.doc-search.index:kb_doc_search}}")
+    private String editorSimilarityDocSearchIndex;
+
+    @Value("${editor.similarity.doc-search-max-candidates:8}")
+    private int editorSimilarityDocSearchMaxCandidates;
+
     @Value("${editor.similarity.max-candidates:20}")
     private int editorSimilarityMaxCandidates;
 
@@ -80,6 +102,9 @@ public class SimilarityService {
 
     @Value("${editor.similarity.rerank-enabled:true}")
     private boolean editorSimilarityRerankEnabled;
+
+    @Value("${editor.similarity.rerank-max-candidates:3}")
+    private int editorSimilarityRerankMaxCandidates;
 
     @Value("${editor.similarity.rerank-min-score:0.50}")
     private double editorSimilarityRerankMinScore;
@@ -424,8 +449,18 @@ public class SimilarityService {
         }
 
         topK = Math.max(1, Math.min(topK, 10));
+        String readableChunkIndex = resolveEditorSimilarityChunkIndex(appCode);
+        timings.put("resolved_chunk_index", readableChunkIndex);
+        if ("__no_readable_index__".equals(readableChunkIndex)) {
+            data.put("skipped", true);
+            data.put("skipReason", "no_readable_index");
+            data.put("costMs", System.currentTimeMillis() - startTime);
+            result.put("code", 200);
+            result.put("data", data);
+            return result;
+        }
         String cacheKey = editorSimilarityCacheKey(appCode, identity, normalizedText, topK, excludeDocId,
-                excludeSource);
+                excludeSource, readableChunkIndex);
         Map<String, Object> cached = readEditorSimilarityCache(cacheKey);
         if (cached != null) {
             cached.put("cacheHit", true);
@@ -435,6 +470,11 @@ public class SimilarityService {
         }
 
         try {
+            int fetchSize = Math.min(Math.max(topK * 4, topK + 5), Math.max(topK, editorSimilarityMaxCandidates));
+            CompletableFuture<EditorDocSearchRecallResult> docSearchFuture = AsyncContextUtil.supplyAsync(
+                    () -> searchEditorDocSearchCandidates(
+                            normalizedText, fetchSize, excludeDocId, excludeSource, identity, readableChunkIndex));
+
             long vectorStart = System.currentTimeMillis();
             Map<String, Object> vectorPayload = new HashMap<>();
             vectorPayload.put("text", normalizedText);
@@ -466,9 +506,12 @@ public class SimilarityService {
             int candidateCount = 0;
             boolean fallbackUsed = false;
 
-            int fetchSize = Math.min(Math.max(topK * 4, topK + 5), Math.max(topK, editorSimilarityMaxCandidates));
             long knnStart = System.currentTimeMillis();
             try {
+                if (identity == null || !identity.isSuperAdmin()) {
+                    throw new IllegalStateException(
+                            "kb_doc_meta lacks source_index filter, using permission-scoped chunk fallback");
+                }
                 SearchRequest knnReq = new SearchRequest.Builder()
                         .index(editorSimilarityMetaIndex)
                         .knn(k -> k.field("doc_vector")
@@ -520,15 +563,22 @@ public class SimilarityService {
                     item.put("rawEsScore", round4(rawScore));
                     item.put("chunkCount", intValue(src.get("chunk_count")));
                     item.put("snippet", snippet);
+                    item.put("recallSource", "doc_meta");
                     item.put("_rerankText", buildRerankText(title, source, snippet));
                     candidates.add(item);
                 }
                 timings.put("permission_ms", System.currentTimeMillis() - permissionStart);
             } catch (Exception metaKnnError) {
                 fallbackUsed = true;
-                timings.put("meta_knn_error", abbreviate(metaKnnError.getMessage(), 240));
+                String metaKnnMessage = abbreviate(metaKnnError.getMessage(), 240);
+                if (metaKnnMessage.contains("permission-scoped chunk fallback")) {
+                    timings.put("meta_knn_skipped", metaKnnMessage);
+                } else {
+                    timings.put("meta_knn_error", metaKnnMessage);
+                }
                 long fallbackStart = System.currentTimeMillis();
-                SearchResponse<Object> chunkResp = searchEditorSimilarChunks(queryVec, fetchSize, identity);
+                SearchResponse<Object> chunkResp = searchEditorSimilarChunks(queryVec, fetchSize, identity,
+                        readableChunkIndex);
                 timings.put("chunk_fallback_ms", System.currentTimeMillis() - fallbackStart);
                 candidateCount = chunkResp.hits().hits().size();
 
@@ -539,8 +589,19 @@ public class SimilarityService {
                 belowThresholdCount += counters[1];
                 timings.put("permission_ms", System.currentTimeMillis() - permissionStart);
             }
+            EditorDocSearchRecallResult docSearchResult = awaitEditorDocSearchRecall(docSearchFuture);
+            int docSearchCandidateCount = mergeEditorDocSearchCandidates(candidates, docSearchResult.items);
+            timings.put("doc_search_ms", docSearchResult.costMs);
+            timings.put("doc_search_raw_candidates", docSearchResult.rawCandidateCount);
+            timings.put("doc_search_candidates", docSearchCandidateCount);
+            timings.put("doc_search_index", editorSimilarityDocSearchIndex);
+            if (!docSearchResult.error.isEmpty()) {
+                timings.put("doc_search_error", docSearchResult.error);
+            }
+
             long evidenceStart = System.currentTimeMillis();
-            int evidenceCount = enrichEditorCandidatesWithEvidence(queryVec, candidates, identity);
+            int evidenceCount = enrichEditorCandidatesWithEvidence(queryVec, candidates, identity,
+                    readableChunkIndex);
             timings.put("evidence_ms", System.currentTimeMillis() - evidenceStart);
             timings.put("evidence_count", evidenceCount);
 
@@ -553,10 +614,12 @@ public class SimilarityService {
             timings.put("below_threshold_count", belowThresholdCount);
             timings.put("fallback_used", fallbackUsed);
             timings.put("meta_index", editorSimilarityMetaIndex);
-            timings.put("chunk_fallback_index", editorSimilarityChunkFallbackIndex);
+            timings.put("chunk_fallback_index", readableChunkIndex);
 
             data.put("items", items);
             data.put("total", items.size());
+            data.put("emptyReason", resolveEditorSimilarityEmptyReason(candidateCount, candidates.size(), items.size(),
+                    docSearchCandidateCount, deniedCount, belowThresholdCount));
             data.put("appCode", appCode == null ? "" : appCode);
             data.put("costMs", System.currentTimeMillis() - startTime);
             data.put("queryChars", normalizedText.length());
@@ -608,15 +671,31 @@ public class SimilarityService {
         return trimmed.substring(trimmed.length() - limit);
     }
 
+    private String resolveEditorSimilarityChunkIndex(String appCode) {
+        try {
+            SysTenantPolicy policy = null;
+            if (appCode != null && !appCode.trim().isEmpty()) {
+                policy = sysTenantPolicyService.getByAppCode(appCode.trim());
+            }
+            return searchIndexResolver.resolve(policy, Collections.emptyMap());
+        } catch (Exception e) {
+            System.err.println("[EditorSimilarity] resolve readable chunk index failed, fallback to configured index: "
+                    + e.getMessage());
+            return editorSimilarityChunkFallbackIndex;
+        }
+    }
+
     private String editorSimilarityCacheKey(String appCode,
             JwtVerifier.UserIdentity identity,
             String text,
             int topK,
             String excludeDocId,
-            String excludeSource) {
+            String excludeSource,
+            String readableChunkIndex) {
         String userId = identity == null ? "anonymous" : stringValue(identity.getUserId());
         String raw = stringValue(appCode) + "|" + userId + "|" + topK + "|"
                 + stringValue(excludeDocId) + "|" + stringValue(excludeSource) + "|"
+                + stringValue(readableChunkIndex) + "|"
                 + editorSimilarityEvidenceEnabled + "|" + editorSimilarityEvidenceFetchDocs + "|"
                 + editorSimilarityEvidenceTopK + "|" + editorSimilarityEvidenceMaxChars + "|"
                 + editorSimilarityRerankEvidenceMaxChars + "|"
@@ -730,6 +809,8 @@ public class SimilarityService {
             values.add(FieldValue.of("_PUBLIC"));
         }
         if ("acl_tokens".equals(field)) {
+            // v2 迁移后读路径只命中纯 keyword 的 v2 索引，acl_tokens / metadata.acl_tokens 均为 keyword；
+            // 旧的 .keyword 兼容子句已无命中对象，已移除（若未来重新纳入 text 型索引需还原）。
             b.filter(ft -> ft.bool(aclb -> aclb
                     .should(s -> s.terms(t -> t.field("acl_tokens").terms(tv -> tv.value(values))))
                     .should(s -> s.terms(t -> t.field("metadata.acl_tokens").terms(tv -> tv.value(values))))
@@ -741,10 +822,11 @@ public class SimilarityService {
 
     private SearchResponse<Object> searchEditorSimilarChunks(List<Double> queryVec,
             int fetchSize,
-            JwtVerifier.UserIdentity identity) throws Exception {
+            JwtVerifier.UserIdentity identity,
+            String readableChunkIndex) throws Exception {
         int size = Math.min(Math.max(fetchSize * 3, 30), 80);
         return esClient.search(new SearchRequest.Builder()
-                .index(editorSimilarityChunkFallbackIndex)
+                .index(readableChunkIndex)
                 .knn(k -> k.field("vector")
                         .queryVector(queryVec)
                         .k(size)
@@ -759,9 +841,279 @@ public class SimilarityService {
                 .build(), Object.class);
     }
 
+    private EditorDocSearchRecallResult searchEditorDocSearchCandidates(String queryText,
+            int fetchSize,
+            String excludeDocId,
+            String excludeSource,
+            JwtVerifier.UserIdentity identity,
+            String readableChunkIndex) {
+        long start = System.currentTimeMillis();
+        if (!editorSimilarityDocSearchEnabled || fetchSize <= 0) {
+            return EditorDocSearchRecallResult.empty(System.currentTimeMillis() - start);
+        }
+        String keywordQuery = buildEditorDocSearchQuery(queryText);
+        if (keywordQuery.isEmpty()) {
+            return EditorDocSearchRecallResult.empty(System.currentTimeMillis() - start);
+        }
+
+        int limit = Math.min(Math.max(fetchSize, 5), Math.max(1, editorSimilarityDocSearchMaxCandidates));
+        try {
+            SearchResponse<Object> resp = esClient.search(new SearchRequest.Builder()
+                    .index(editorSimilarityDocSearchIndex)
+                    .query(q -> q.bool(b -> {
+                        b.must(m -> m.bool(text -> text
+                                .should(s -> s.multiMatch(mm -> mm
+                                        .query(keywordQuery)
+                                        .fields(Arrays.asList(
+                                                "title^5",
+                                                "source^3",
+                                                "keywords^4",
+                                                "doc_terms^2",
+                                                "summary^1.5",
+                                                "document_number^3"))))
+                                .should(s -> s.matchPhrase(mp -> mp.field("title").query(keywordQuery).boost(6.0f)))
+                                .should(s -> s.matchPhrase(mp -> mp.field("doc_terms").query(keywordQuery).boost(4.0f)))
+                                .minimumShouldMatch("1")));
+                        appendLatestFilter(b, "is_latest");
+                        appendEditorDocSearchAclFilters(b, identity, readableChunkIndex);
+                        return b;
+                    }))
+                    .size(limit)
+                    .source(s -> s.filter(f -> f.excludes(Arrays.asList("doc_vector", "vector"))))
+                    .build(), Object.class);
+
+            List<Map<String, Object>> items = new ArrayList<>();
+            int rawCandidateCount = resp.hits().hits().size();
+            for (Hit<Object> hit : resp.hits().hits()) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> src = (Map<String, Object>) hit.source();
+                if (src == null) {
+                    continue;
+                }
+                String source = firstNonBlank(src.get("source"), src.get("file_name"));
+                String docId = firstNonBlank(src.get("doc_id"), src.get("id"), source, hit.id());
+                if (source.isEmpty() || isSameDoc(docId, source, excludeDocId, excludeSource)) {
+                    continue;
+                }
+                if (!permissionGuard.canAccess(source, identity).isAllowed()) {
+                    continue;
+                }
+                double rawScore = hit.score() != null ? hit.score() : 0.0;
+                double keywordScore = normalizeKeywordScore(rawScore);
+                String title = firstNonBlank(src.get("title"), src.get("name"), source);
+                String snippet = buildDocMetaSnippet(src);
+
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("docId", docId);
+                item.put("source", source);
+                item.put("title", title);
+                item.put("similarity", round4(keywordScore));
+                item.put("vectorScore", round4(keywordScore));
+                item.put("keywordScore", round4(keywordScore));
+                item.put("rawKeywordScore", round4(rawScore));
+                item.put("chunkCount", intValue(src.get("chunk_count")));
+                item.put("snippet", snippet);
+                item.put("recallSource", "doc_search");
+                item.put("_rerankText", buildRerankText(title, source, snippet));
+                items.add(item);
+            }
+            return new EditorDocSearchRecallResult(items, rawCandidateCount, System.currentTimeMillis() - start, "");
+        } catch (Exception e) {
+            System.err.println("[EditorSimilarityDocSearch] failed: " + e.getMessage());
+            return new EditorDocSearchRecallResult(
+                    Collections.emptyList(), 0, System.currentTimeMillis() - start, abbreviate(e.getMessage(), 240));
+        }
+    }
+
+    private EditorDocSearchRecallResult awaitEditorDocSearchRecall(
+            CompletableFuture<EditorDocSearchRecallResult> future) {
+        if (future == null) {
+            return EditorDocSearchRecallResult.empty(0);
+        }
+        try {
+            EditorDocSearchRecallResult result = future.get();
+            return result == null ? EditorDocSearchRecallResult.empty(0) : result;
+        } catch (Exception e) {
+            return new EditorDocSearchRecallResult(Collections.emptyList(), 0, 0, abbreviate(e.getMessage(), 240));
+        }
+    }
+
+    private int mergeEditorDocSearchCandidates(List<Map<String, Object>> candidates,
+            List<Map<String, Object>> docSearchItems) {
+        if (candidates == null || docSearchItems == null || docSearchItems.isEmpty()) {
+            return 0;
+        }
+        int appended = 0;
+        Set<String> existing = existingCandidateKeys(candidates);
+        for (Map<String, Object> item : docSearchItems) {
+            String key = candidateKey(stringValue(item.get("docId")), stringValue(item.get("source")));
+            if (existing.contains(key)) {
+                mergeRecallSource(candidates, key, "doc_search");
+                continue;
+            }
+            candidates.add(item);
+            existing.add(key);
+            appended++;
+        }
+        return appended;
+    }
+
+    private void mergeRecallSource(List<Map<String, Object>> candidates, String key, String recallSource) {
+        for (Map<String, Object> candidate : candidates) {
+            if (!candidateKey(stringValue(candidate.get("docId")), stringValue(candidate.get("source"))).equals(key)) {
+                continue;
+            }
+            String existing = stringValue(candidate.get("recallSource"));
+            if (existing.isEmpty()) {
+                candidate.put("recallSource", recallSource);
+            } else if (!Arrays.asList(existing.split(",")).contains(recallSource)) {
+                candidate.put("recallSource", existing + "," + recallSource);
+            }
+            return;
+        }
+    }
+
+    private void appendEditorDocSearchAclFilters(BoolQuery.Builder b,
+            JwtVerifier.UserIdentity identity,
+            String readableChunkIndex) {
+        if (esRecallUtils != null) {
+            String userId = identity == null ? "" : stringValue(identity.getUserId());
+            String deptCode = identity == null ? "" : stringValue(identity.getDeptCode());
+            boolean isAnonymous = userId.isEmpty();
+            b.filter(esRecallUtils.buildDocSearchPermFilter(isAnonymous, userId, esRecallUtils.buildDeptValues(deptCode)));
+            b.filter(esRecallUtils.buildDocSearchSourceIndexFilter(readableChunkIndex));
+            return;
+        }
+        appendAclFilter(b, "acl_tokens", identity);
+    }
+
+    private Set<String> existingCandidateKeys(List<Map<String, Object>> candidates) {
+        Set<String> keys = new LinkedHashSet<>();
+        for (Map<String, Object> candidate : candidates) {
+            keys.add(candidateKey(stringValue(candidate.get("docId")), stringValue(candidate.get("source"))));
+        }
+        return keys;
+    }
+
+    private String candidateKey(String docId, String source) {
+        String cleanDocId = stringValue(docId);
+        if (!cleanDocId.isEmpty()) {
+            return "id:" + cleanDocId;
+        }
+        return "source:" + stringValue(source);
+    }
+
+    private double normalizeKeywordScore(double rawScore) {
+        if (rawScore <= 0.0) {
+            return 0.0;
+        }
+        return clamp01(Math.max(editorSimilarityMinScore, rawScore / (rawScore + 5.0)));
+    }
+
+    private String buildEditorDocSearchQuery(String text) {
+        List<String> terms = extractEditorDocSearchTerms(text);
+        return String.join(" ", terms).trim();
+    }
+
+    private List<String> extractEditorDocSearchTerms(String text) {
+        String value = stringValue(text);
+        if (value.isEmpty()) {
+            return Collections.emptyList();
+        }
+        LinkedHashSet<String> terms = new LinkedHashSet<>();
+        String chinese = value.replaceAll("[^\\u4e00-\\u9fa5]", "");
+        String repeatedUnit = detectRepeatedChineseUnit(chinese);
+        if (!repeatedUnit.isEmpty()) {
+            terms.add(repeatedUnit);
+        }
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        int maxN = Math.min(4, chinese.length());
+        for (int n = maxN; n >= 2; n--) {
+            for (int i = 0; i + n <= chinese.length(); i++) {
+                String term = chinese.substring(i, i + n);
+                if (term.chars().distinct().count() <= 1) {
+                    continue;
+                }
+                counts.put(term, counts.getOrDefault(term, 0) + 1);
+            }
+        }
+        counts.entrySet().stream()
+                .sorted((a, b) -> {
+                    int countCompare = Integer.compare(b.getValue(), a.getValue());
+                    if (countCompare != 0) {
+                        return countCompare;
+                    }
+                    return Integer.compare(b.getKey().length(), a.getKey().length());
+                })
+                .limit(8)
+                .forEach(entry -> terms.add(entry.getKey()));
+        if (terms.isEmpty()) {
+            String cleaned = value.replaceAll("[^\\u4e00-\\u9fa5a-zA-Z0-9]+", " ").trim();
+            if (!cleaned.isEmpty()) {
+                terms.addAll(Arrays.asList(cleaned.split("\\s+")));
+            }
+        }
+        List<String> result = new ArrayList<>();
+        for (String term : terms) {
+            if (term != null && !term.trim().isEmpty()) {
+                result.add(term.trim());
+                if (result.size() >= 8) {
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+
+    private String detectRepeatedChineseUnit(String chinese) {
+        if (chinese == null || chinese.length() < 4) {
+            return "";
+        }
+        int maxUnit = Math.min(8, chinese.length() / 2);
+        for (int len = 2; len <= maxUnit; len++) {
+            String unit = chinese.substring(0, len);
+            int matched = 0;
+            for (int i = 0; i + len <= chinese.length(); i += len) {
+                if (!unit.equals(chinese.substring(i, i + len))) {
+                    break;
+                }
+                matched += len;
+            }
+            if (matched >= chinese.length() * 0.8) {
+                return unit;
+            }
+        }
+        return "";
+    }
+
+    private String resolveEditorSimilarityEmptyReason(int rawCandidateCount,
+            int accessibleCandidateCount,
+            int itemCount,
+            int docSearchCandidateCount,
+            int deniedCount,
+            int belowThresholdCount) {
+        if (itemCount > 0) {
+            return "";
+        }
+        if (accessibleCandidateCount > 0) {
+            return "reranker_rejected_all";
+        }
+        if (deniedCount > 0) {
+            return "permission_filtered";
+        }
+        if (belowThresholdCount > 0) {
+            return "vector_score_below_threshold";
+        }
+        if (rawCandidateCount > 0 || docSearchCandidateCount > 0) {
+            return "candidate_unavailable_after_filter";
+        }
+        return "no_candidates";
+    }
+
     private int enrichEditorCandidatesWithEvidence(List<Double> queryVec,
             List<Map<String, Object>> candidates,
-            JwtVerifier.UserIdentity identity) {
+            JwtVerifier.UserIdentity identity,
+            String readableChunkIndex) {
         if (!editorSimilarityEvidenceEnabled || queryVec == null || queryVec.isEmpty()
                 || candidates == null || candidates.isEmpty()) {
             return 0;
@@ -773,7 +1125,7 @@ public class SimilarityService {
             Map<String, Object> item = candidates.get(i);
             String docId = stringValue(item.get("docId"));
             String source = stringValue(item.get("source"));
-            String evidence = fetchBestChunkEvidence(queryVec, docId, source, identity);
+            String evidence = fetchBestChunkEvidence(queryVec, docId, source, identity, readableChunkIndex);
             if (evidence.isEmpty()) {
                 continue;
             }
@@ -793,7 +1145,8 @@ public class SimilarityService {
     private String fetchBestChunkEvidence(List<Double> queryVec,
             String docId,
             String source,
-            JwtVerifier.UserIdentity identity) {
+            JwtVerifier.UserIdentity identity,
+            String readableChunkIndex) {
         if (stringValue(docId).isEmpty() && stringValue(source).isEmpty()) {
             return "";
         }
@@ -801,7 +1154,7 @@ public class SimilarityService {
         int maxChars = Math.max(200, editorSimilarityEvidenceMaxChars);
         try {
             SearchResponse<Object> resp = esClient.search(new SearchRequest.Builder()
-                    .index(editorSimilarityChunkFallbackIndex)
+                    .index(readableChunkIndex)
                     .knn(k -> k.field("vector")
                             .queryVector(queryVec)
                             .k(topK)
@@ -953,8 +1306,14 @@ public class SimilarityService {
             return Collections.emptyList();
         }
 
+        List<Map<String, Object>> rerankCandidates = candidates;
+        if (editorSimilarityRerankEnabled) {
+            int limit = Math.min(candidates.size(), Math.max(1, editorSimilarityRerankMaxCandidates));
+            rerankCandidates = new ArrayList<>(candidates.subList(0, limit));
+        }
+
         List<String> documents = new ArrayList<>();
-        for (Map<String, Object> candidate : candidates) {
+        for (Map<String, Object> candidate : rerankCandidates) {
             documents.add(stringValue(candidate.get("_rerankText")));
         }
 
@@ -963,9 +1322,11 @@ public class SimilarityService {
         List<Double> rawRerankScores = rerankResult != null ? rerankResult.rawScores : null;
         boolean rerankUsed = rerankScores != null;
         double threshold = rerankUsed ? clamp01(editorSimilarityRerankMinScore) : editorSimilarityMinScore;
+        double rejectThreshold = clamp01(editorSimilarityConflictRerankThreshold);
+        List<Map<String, Object>> scoringCandidates = rerankUsed ? rerankCandidates : candidates;
         List<Map<String, Object>> accepted = new ArrayList<>();
-        for (int i = 0; i < candidates.size(); i++) {
-            Map<String, Object> item = new LinkedHashMap<>(candidates.get(i));
+        for (int i = 0; i < scoringCandidates.size(); i++) {
+            Map<String, Object> item = new LinkedHashMap<>(scoringCandidates.get(i));
             boolean evidenceUsed = Boolean.TRUE.equals(item.get("evidenceUsed"));
             double vectorScore = item.get("vectorScore") instanceof Number
                     ? ((Number) item.get("vectorScore")).doubleValue()
@@ -977,6 +1338,10 @@ public class SimilarityService {
                     ? rawRerankScores.get(i)
                     : null;
             double rerankWeight = effectiveRerankWeight(evidenceUsed);
+            // reranker 是文档级相关性的最终判别器；它强否定时不再让向量召回分兜底展示噪声。
+            if (rerankUsed && rerankScore < rejectThreshold) {
+                continue;
+            }
             double businessScore = !rerankUsed
                     ? vectorScore
                     : clamp01(rerankScore * rerankWeight + vectorScore * (1.0 - rerankWeight));
@@ -1160,10 +1525,33 @@ public class SimilarityService {
         }
     }
 
-    private double calibrateEsVectorScore(double rawScore) {
-        if (rawScore <= 1.0 && rawScore >= 0.0) {
-            return clamp01(rawScore * 2.0 - 1.0);
+    private static class EditorDocSearchRecallResult {
+        private final List<Map<String, Object>> items;
+        private final int rawCandidateCount;
+        private final long costMs;
+        private final String error;
+
+        private EditorDocSearchRecallResult(List<Map<String, Object>> items,
+                int rawCandidateCount,
+                long costMs,
+                String error) {
+            this.items = items == null ? Collections.emptyList() : items;
+            this.rawCandidateCount = rawCandidateCount;
+            this.costMs = Math.max(0L, costMs);
+            this.error = error == null ? "" : error;
         }
+
+        private static EditorDocSearchRecallResult empty(long costMs) {
+            return new EditorDocSearchRecallResult(Collections.emptyList(), 0, costMs, "");
+        }
+    }
+
+    /**
+     * 业务功能：统一编辑器相似文档链路使用的向量分数口径。
+     * 关键流程：ES dense_vector cosine 查询已返回可直接用于业务阈值判断的非负分数；
+     * 这里只做边界夹紧，避免把 0.70+ 的有效候选二次线性转换后误杀。
+     */
+    private double calibrateEsVectorScore(double rawScore) {
         return clamp01(rawScore);
     }
 

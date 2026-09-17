@@ -40,9 +40,9 @@ public class IndexAclSubjectService {
                                    String effect,
                                    String createdBy,
                                    LocalDateTime expiresAt) {
-        String physicalIndex = indexAliasResolver.normalizeWriteTarget(indexName);
+        String aclKey = indexAliasResolver.toLogicalIndex(indexAliasResolver.normalizeWriteTarget(indexName));
         KbIndexAclSubject row = new KbIndexAclSubject();
-        row.setIndexName(physicalIndex);
+        row.setIndexName(aclKey);
         row.setReadAlias(IndexAliasResolver.DOCUMENT_READ_ALIAS);
         row.setSubjectType(normalize(subjectType));
         row.setSubjectValue(normalizeSubjectValue(row.getSubjectType(), subjectValue));
@@ -71,13 +71,13 @@ public class IndexAclSubjectService {
     }
 
     public List<KbIndexAclSubject> listActive(String indexName) {
-        String physicalIndex = indexAliasResolver.normalizeWriteTarget(indexName);
-        return mapper.findActiveByIndex(physicalIndex);
+        String aclKey = indexAliasResolver.toLogicalIndex(indexAliasResolver.normalizeWriteTarget(indexName));
+        return mapper.findActiveByIndex(aclKey);
     }
 
     public Decision decide(String indexName, JwtVerifier.UserIdentity identity, String scope) {
-        String physicalIndex = indexAliasResolver.normalizeWriteTarget(indexName);
-        List<KbIndexAclSubject> rules = mapper.findActiveByIndexAndScope(physicalIndex, normalizeScope(scope));
+        String aclKey = indexAliasResolver.toLogicalIndex(indexAliasResolver.normalizeWriteTarget(indexName));
+        List<KbIndexAclSubject> rules = mapper.findActiveByIndexAndScope(aclKey, normalizeScope(scope));
         if (rules == null || rules.isEmpty()) {
             return Decision.ABSTAIN;
         }
@@ -99,8 +99,8 @@ public class IndexAclSubjectService {
     }
 
     public boolean hasRules(String indexName, String scope) {
-        String physicalIndex = indexAliasResolver.normalizeWriteTarget(indexName);
-        List<KbIndexAclSubject> rules = mapper.findActiveByIndexAndScope(physicalIndex, normalizeScope(scope));
+        String aclKey = indexAliasResolver.toLogicalIndex(indexAliasResolver.normalizeWriteTarget(indexName));
+        List<KbIndexAclSubject> rules = mapper.findActiveByIndexAndScope(aclKey, normalizeScope(scope));
         return rules != null && !rules.isEmpty();
     }
 

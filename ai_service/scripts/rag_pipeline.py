@@ -1,6 +1,7 @@
 import os
 import torch
 import time
+import math
 from sentence_transformers import SentenceTransformer
 from core.chunking.semantic_chunker import SemanticChunker
 from elasticsearch import Elasticsearch, helpers
@@ -25,6 +26,61 @@ INDEX_NAME  = "kb_document_v1"
 QA_INDEX_NAME  = "kb_qa_pairs"
 DOC_META_INDEX = "kb_doc_meta"
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
+VECTOR_DIMS = 1024
+VECTOR_NORM_MIN = 1e-8
+
+
+def _validate_single_dense_vector_for_indexing(vector: list, source_name: str, chunk_index: int) -> None:
+    """
+    业务功能：校验历史离线脚本生成的单条 chunk 向量，阻止错误向量写入 ES。
+    关键流程：检查向量类型、固定维度、浮点合法性和非零范数，任一异常直接抛错中断本次入库。
+    设计原因：离线脚本可能绕过主服务质量门，必须在写入前本地兜住坏向量而不是写入零向量。
+    """
+    if not isinstance(vector, (list, tuple)):
+        raise ValueError(f"dense_vector_invalid_type: source={source_name}, chunk_index={chunk_index}")
+    if len(vector) != VECTOR_DIMS:
+        raise ValueError(
+            f"dense_vector_dim_mismatch: source={source_name}, chunk_index={chunk_index}, "
+            f"expected={VECTOR_DIMS}, actual={len(vector)}"
+        )
+    norm_sq = 0.0
+    for value in vector:
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ValueError(f"dense_vector_invalid_value: source={source_name}, chunk_index={chunk_index}")
+        norm_sq += float(value) * float(value)
+    if norm_sq <= VECTOR_NORM_MIN * VECTOR_NORM_MIN:
+        raise ValueError(f"dense_vector_zero_norm: source={source_name}, chunk_index={chunk_index}")
+
+
+def _env_int(name: str, default: int, min_value: int = 0) -> int:
+    """
+    业务功能：读取 ES 索引容量相关整数配置。
+    关键流程：历史脚本可能被离线单独执行，非法配置回退默认值，避免生成不可用模板。
+    """
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        print(f"[RAGPipeline] env {name}={raw!r} is not an integer, fallback to {default}")
+        return default
+    if value < min_value:
+        print(f"[RAGPipeline] env {name}={value} is lower than {min_value}, fallback to {default}")
+        return default
+    return value
+
+
+def document_index_settings() -> dict:
+    """
+    业务功能：生成 kb_document_* 模板 settings。
+    关键流程：分片和副本通过环境变量控制，避免历史脚本覆盖 v2 模板时退回单分片零副本。
+    """
+    return {
+        "number_of_shards": _env_int("KB_DOCUMENT_SHARDS", 1, min_value=1),
+        "number_of_replicas": _env_int("KB_DOCUMENT_REPLICAS", 0, min_value=0),
+    }
+
 
 class RAGPipeline:
     def __init__(self):
@@ -212,8 +268,7 @@ class RAGPipeline:
                             "kb_document": {}  # 别名，Java 侧通过此别名查询无需关心具体版本号
                         },
                         "settings": {
-                            "number_of_shards": 1,
-                            "number_of_replicas": 0,
+                            **document_index_settings(),
                             "analysis": {
                                 "analyzer": {
                                     "ik_smart": {"type": "custom", "tokenizer": "ik_smart"},
@@ -905,7 +960,10 @@ class RAGPipeline:
 
             # 向量化推理（入库端不加 query instruction prefix，与检索端对称）
             vecs = model_manager.encode(chunk.content)
-            vector = vecs[0] if vecs else [0.0] * 1024
+            if not vecs:
+                raise ValueError(f"dense_vector_missing: source={source_name}, chunk_index={i}")
+            vector = vecs[0]
+            _validate_single_dense_vector_for_indexing(vector, source_name, i)
 
             # [A5] 定义 chunk 的 doc_id（含版本号，保证不同版本 chunk 不互相覆盖）
             # 根因：原来 doc_id 只含 file_base_hash+index，同名文件重复上传时 v2 会直接覆盖 v1

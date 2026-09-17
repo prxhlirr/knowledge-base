@@ -41,6 +41,8 @@ import java.util.concurrent.*;
 @CrossOrigin(origins = "*")
 public class SearchController {
 
+    private static final long DEFAULT_SEARCH_TOTAL_TIMEOUT_MS = 10000L;
+
     @Autowired
     private com.boyang.search.service.SearchServiceV2 searchServiceV2;
     @Autowired
@@ -74,10 +76,79 @@ public class SearchController {
 
     /** 
      * 混合检索与精排链路的统一服务等级协议（SLA）超时阈值（单位：毫秒）。
-     * 超时后将自动降级并截断返回当前已有的最优检索结果，默认值为 5000ms。
+     * 超时后将自动降级并截断返回当前已有的最优检索结果，默认值为 10000ms。
      */
-    @Value("${search.total.sla-ms:5000}")
-    private long searchTotalTimeoutMs;
+    @Value("${search.total.sla-ms:${SEARCH_TOTAL_SLA_MS:10000}}")
+    private String searchTotalTimeoutMs = String.valueOf(DEFAULT_SEARCH_TOTAL_TIMEOUT_MS);
+
+    /**
+     * 业务功能：控制文档分片明细接口按 docId/fileName 查询时最多返回的 chunk 数。
+     * 设计原因：大文档明细展示会直接放大 ES 返回体和前端渲染成本，生产环境需要按文档规模动态调节。
+     */
+    @Value("${search.chunks.max-size:${SEARCH_CHUNKS_MAX_SIZE:500}}")
+    private String chunksMaxSize = "500";
+
+    /**
+     * 业务功能：控制文档分片明细接口缺少 docId/fileName 时的调试兜底返回数。
+     * 设计原因：兜底 match_all 只应用于调试，必须严格限制窗口，避免误用时扩大 ES 压力。
+     */
+    @Value("${search.chunks.fallback-size:${SEARCH_CHUNKS_FALLBACK_SIZE:10}}")
+    private String chunksFallbackSize = "10";
+
+    /**
+     * 业务功能：限制首页混合检索进入后端 Pipeline 的候选深度。
+     * 关键流程：首页只需要快速给出预览和 QA 证据，不能让前端 pageSize 放大 ColBERT 精排输入。
+     */
+    @Value("${search.home.hybrid.top-k:${SEARCH_HOME_HYBRID_TOP_K:12}}")
+    private String homeHybridTopK = "12";
+
+    /**
+     * 业务功能：解析主检索总 SLA 超时时间。
+     * 关键流程：配置缺失或非法时回退默认 10000ms，避免环境变量错误导致服务启动失败或请求立即超时。
+     *
+     * @return 当前生效的主检索总超时时间，单位毫秒
+     */
+    long resolveSearchTotalTimeoutMs() {
+        if (searchTotalTimeoutMs == null || searchTotalTimeoutMs.trim().isEmpty()) {
+            return DEFAULT_SEARCH_TOTAL_TIMEOUT_MS;
+        }
+        try {
+            long value = Long.parseLong(searchTotalTimeoutMs.trim());
+            return value > 0 ? value : DEFAULT_SEARCH_TOTAL_TIMEOUT_MS;
+        } catch (NumberFormatException ex) {
+            return DEFAULT_SEARCH_TOTAL_TIMEOUT_MS;
+        }
+    }
+
+    int resolveChunksMaxSize() {
+        return resolvePositiveInt(chunksMaxSize, 500);
+    }
+
+    int resolveChunksFallbackSize() {
+        return resolvePositiveInt(chunksFallbackSize, 10);
+    }
+
+    /**
+     * 业务功能：解析首页混合检索专用候选深度。
+     * 关键流程：配置非法时回退到 12，保证首页不会因 pageSize=50 把 ColBERT 输入放大到 50。
+     *
+     * @return 首页 hybrid 后端实际召回上限
+     */
+    int resolveHomeHybridTopK() {
+        return resolvePositiveInt(homeHybridTopK, 12);
+    }
+
+    int resolvePositiveInt(String configured, int defaultValue) {
+        if (configured == null) {
+            return defaultValue;
+        }
+        try {
+            int value = Integer.parseInt(configured.trim());
+            return value > 0 ? value : defaultValue;
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
+    }
 
     /**
      * [性能/可回滚] 首页 keyword 检索是否走 Redis 结果缓存。
@@ -259,13 +330,14 @@ public class SearchController {
                         }
                     }, SEARCH_EXECUTOR); // [P1-4] 使用专属线程池，不占公共 ForkJoinPool
 
+            long effectiveSearchTotalTimeoutMs = resolveSearchTotalTimeoutMs();
             try {
-                results = future.get(searchTotalTimeoutMs, TimeUnit.MILLISECONDS);
+                results = future.get(effectiveSearchTotalTimeoutMs, TimeUnit.MILLISECONDS);
             } catch (TimeoutException te) {
                 slaTimeout = true;
                 future.cancel(true); // [P1-4] 超时后主动取消，释放线程资源
                 System.err.printf("[SearchSLA] 搜索超出 SLA %dms，降级返回空 query='%s'%n",
-                        searchTotalTimeoutMs,
+                        effectiveSearchTotalTimeoutMs,
                         queryText.length() > 30 ? queryText.substring(0, 30) : queryText);
                 results = Collections.emptyList();
             } catch (Exception ex) {
@@ -391,12 +463,10 @@ public class SearchController {
             //      此时直接针对 metadata.doc_id (keyword 类型) 构建高效的 term 精确检索 (O(1) 复杂度)。
             //   2. 降级适配旧版本：如果无 docId，则降级至对 metadata.source 字段构建 matchPhrase 检索（文件名模糊匹配）。
             co.elastic.clients.elasticsearch.core.SearchRequest chunksReq;
-            if (docId != null && !docId.trim().isEmpty() 
-            && fileName == null && fileName.trim().isEmpty()
-            && !"by-file-name".equals(docId)) {
+            if (shouldQueryChunksByDocId(docId, fileName)) {
                 chunksReq = new co.elastic.clients.elasticsearch.core.SearchRequest.Builder()
                         .index(finalIndex)
-                        .size(500)
+                        .size(resolveChunksMaxSize())
                         .query(q -> q.bool(b -> b
                                 .must(mq -> mq.term(t -> t
                                         .field("metadata.doc_id")
@@ -412,7 +482,7 @@ public class SearchController {
             } else if (fileName != null && !fileName.trim().isEmpty()) {
                 chunksReq = new co.elastic.clients.elasticsearch.core.SearchRequest.Builder()
                         .index(finalIndex)
-                        .size(500)
+                        .size(resolveChunksMaxSize())
                         .query(q -> q.bool(b -> b
                                 .must(mq -> mq.matchPhrase(m -> m
                                         .field("metadata.source")
@@ -429,7 +499,7 @@ public class SearchController {
                 // 兜底模式：无文件名时按 match_all 降级（仅调试使用，结果不保证准确）
                 chunksReq = new co.elastic.clients.elasticsearch.core.SearchRequest.Builder()
                         .index(finalIndex)
-                        .size(10)
+                        .size(resolveChunksFallbackSize())
                         .query(q -> q.bool(b -> b
                                 .must(m -> m.matchAll(ma -> ma))
                                 .filter(f -> f.term(t -> t
@@ -581,11 +651,7 @@ public class SearchController {
             // 兼容性：从前端优先获取，缺省默认 ik_smart
             String analyzer = requestBody.getOrDefault("analyzer", "ik_smart");
 
-            co.elastic.clients.elasticsearch.indices.AnalyzeRequest req = co.elastic.clients.elasticsearch.indices.AnalyzeRequest
-                    .of(a -> a
-                            .index("kb_document_v1") // [Fix] ES的 _analyze 接口不支持指向多个物理索引的 Alias(如kb_document)，必须指定单一物理索引
-                            .analyzer(analyzer)
-                            .text(text));
+            co.elastic.clients.elasticsearch.indices.AnalyzeRequest req = buildAnalyzeRequest(text, analyzer);
 
             // 发起 analyze 请求
             co.elastic.clients.elasticsearch.indices.AnalyzeResponse resp = esClient.indices().analyze(req);
@@ -607,6 +673,59 @@ public class SearchController {
             response.put("msg", "分词异常: " + e.getMessage());
         }
         return response;
+    }
+
+    /**
+     * 判断分片明细是否应按 doc_id 精确查询。
+     *
+     * 业务功能：
+     *   分片明细接口同时兼容 doc_id 和 fileName 两种入口。doc_id 是更稳定的文档哈希，
+     *   但当前权限校验仍依赖 fileName，因此本方法只负责构建查询分支的空值安全判断，
+     *   不改变接口现有的权限准入规则。
+     *
+     * 关键流程：
+     *   1. docId 为空时不能按 doc_id 查询；
+     *   2. fileName 有值时优先走文件名分支，保持旧行为；
+     *   3. docId 为 by-file-name 时明确表示前端要求文件名模式。
+     *
+     * @param docId 文档哈希或 by-file-name 哨兵值
+     * @param fileName 文件名
+     * @return 是否使用 metadata.doc_id 精确查询
+     */
+    boolean shouldQueryChunksByDocId(String docId, String fileName) {
+        return isNotBlank(docId)
+                && isBlank(fileName)
+                && !"by-file-name".equals(docId);
+    }
+
+    /**
+     * 构建无索引绑定的 ES analyze 请求。
+     *
+     * 业务功能：
+     *   前端高亮只需要指定 analyzer 对输入文本分词，不需要依赖某个具体文档索引。
+     *   旧实现固定绑定 `kb_document_v1`，在多物理索引或 v1 下线后会失败。
+     *
+     * 关键流程：
+     *   1. 使用请求传入的 analyzer，保持 `ik_smart/ik_max_word` 等现有调用兼容；
+     *   2. 不设置 index，让 ES 走集群级 analyzer，避免旧物理索引依赖；
+     *   3. text 原样传入，由调用方负责空文本校验。
+     *
+     * @param text 待分词文本
+     * @param analyzer ES analyzer 名称
+     * @return AnalyzeRequest
+     */
+    co.elastic.clients.elasticsearch.indices.AnalyzeRequest buildAnalyzeRequest(String text, String analyzer) {
+        return co.elastic.clients.elasticsearch.indices.AnalyzeRequest.of(a -> a
+                .analyzer(analyzer)
+                .text(text));
+    }
+
+    private boolean isBlank(String value) {
+        return value == null || value.trim().isEmpty();
+    }
+
+    private boolean isNotBlank(String value) {
+        return !isBlank(value);
     }
 
     /**
@@ -840,6 +959,7 @@ public class SearchController {
                 final String finalAppCode = appCode;
                 final String finalQueryText = queryText;
                 final int finalPageSize = pageSize;
+                final int finalHybridTopK = Math.min(finalPageSize, resolveHomeHybridTopK());
                 final Map<String, Object> finalFilters = filters;
 
                 CompletableFuture<List<Map<String, Object>>> keywordFuture = supplySearchForHome(finalAppCode,
@@ -850,7 +970,7 @@ public class SearchController {
                             com.boyang.search.security.UserContextHolder.setIdentity(mainThreadIdentity);
                             try {
                                 return searchServiceV2.hybridSearchContextForHome(finalAppCode, finalQueryText,
-                                        finalPageSize, finalFilters, "hybrid");
+                                        finalHybridTopK, finalFilters, "hybrid");
                             } catch (Exception e) {
                                 throw new RuntimeException(e);
                             } finally {
@@ -867,7 +987,7 @@ public class SearchController {
                         hybridContext == null || hybridContext.getFinalResult() == null
                                 ? Collections.emptyList()
                                 : hybridContext.getFinalResult(),
-                        hybridContext == null ? searchTotalTimeoutMs : System.currentTimeMillis() - hybridContext.getStartTime(),
+                        hybridContext == null ? resolveSearchTotalTimeoutMs() : System.currentTimeMillis() - hybridContext.getStartTime(),
                         hybridContext == null,
                         hybridContext == null,
                         hybridContext == null ? "success (sla_timeout_degraded)" : "success");
@@ -1511,7 +1631,8 @@ public class SearchController {
             int pageSize) {
         long startMs = System.currentTimeMillis();
         try {
-            List<Map<String, Object>> results = future.get(searchTotalTimeoutMs, TimeUnit.MILLISECONDS);
+            long effectiveSearchTotalTimeoutMs = resolveSearchTotalTimeoutMs();
+            List<Map<String, Object>> results = future.get(effectiveSearchTotalTimeoutMs, TimeUnit.MILLISECONDS);
             return new SearchRunResult(
                     results == null ? Collections.emptyList() : results,
                     System.currentTimeMillis() - startMs,
@@ -1520,7 +1641,7 @@ public class SearchController {
                     "success");
         } catch (TimeoutException te) {
             future.cancel(true);
-            System.err.printf("[HomeSearchSLA] %s 搜索超出 SLA %dms%n", searchMode, searchTotalTimeoutMs);
+            System.err.printf("[HomeSearchSLA] %s 搜索超出 SLA %dms%n", searchMode, resolveSearchTotalTimeoutMs());
             return new SearchRunResult(Collections.emptyList(),
                     System.currentTimeMillis() - startMs,
                     false,
@@ -1540,10 +1661,11 @@ public class SearchController {
             CompletableFuture<com.boyang.search.pipeline.SearchContext> future,
             String searchMode) {
         try {
-            return future.get(searchTotalTimeoutMs, TimeUnit.MILLISECONDS);
+            long effectiveSearchTotalTimeoutMs = resolveSearchTotalTimeoutMs();
+            return future.get(effectiveSearchTotalTimeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException te) {
             future.cancel(true);
-            System.err.printf("[HomeSearchSLA] %s 搜索上下文超出 SLA %dms%n", searchMode, searchTotalTimeoutMs);
+            System.err.printf("[HomeSearchSLA] %s 搜索上下文超出 SLA %dms%n", searchMode, resolveSearchTotalTimeoutMs());
             return null;
         } catch (Exception e) {
             System.err.printf("[HomeSearch] %s 搜索上下文失败: %s%n", searchMode, e.getMessage());

@@ -1,0 +1,177 @@
+{
+  "aliases": [
+    {
+      "alias": "kb_document",
+      "index": "kb_document_public",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_public_write",
+      "index": "kb_document_public",
+      "is_write_index": "true"
+    },
+    {
+      "alias": "kb_document",
+      "index": "kb_document_news_v2",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_news_write",
+      "index": "kb_document_news_v2",
+      "is_write_index": "true"
+    },
+    {
+      "alias": "kb_document",
+      "index": "kb_document_official",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_official_write",
+      "index": "kb_document_official",
+      "is_write_index": "true"
+    },
+    {
+      "alias": "kb_document",
+      "index": "kb_document_notice",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_notice_write",
+      "index": "kb_document_notice",
+      "is_write_index": "true"
+    },
+    {
+      "alias": "kb_document",
+      "index": "kb_document_v1",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_v1_write",
+      "index": "kb_document_v1",
+      "is_write_index": "true"
+    },
+    {
+      "alias": "kb_document",
+      "index": "kb_document_law",
+      "is_write_index": "-"
+    },
+    {
+      "alias": "kb_document_law_write",
+      "index": "kb_document_law",
+      "is_write_index": "true"
+    }
+  ],
+  "indices": {
+    "kb_document_news": {
+      "count": 16,
+      "acl_tokens": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "has_vector": true,
+      "source_index": {
+        "type": "keyword"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "kb_document_news_v2": {
+      "count": 16,
+      "acl_tokens": {
+        "type": "keyword"
+      },
+      "has_vector": true,
+      "source_index": {
+        "type": "keyword"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "kb_document_public": {
+      "count": 22,
+      "acl_tokens": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "has_vector": true,
+      "source_index": {
+        "type": "keyword"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "kb_document_official": {
+      "count": 669,
+      "acl_tokens": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "has_vector": true,
+      "source_index": {
+        "type": "keyword"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "kb_document_law": {
+      "count": 0,
+      "acl_tokens": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "has_vector": true,
+      "source_index": {
+        "type": "keyword"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "kb_document_notice": {
+      "count": 0,
+      "acl_tokens": null,
+      "has_vector": true,
+      "source_index": {
+        "type": "keyword"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "kb_document_v1": {
+      "count": 0,
+      "acl_tokens": null,
+      "has_vector": true,
+      "source_index": {
+        "type": "keyword"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    }
+  }
+}

@@ -5,6 +5,7 @@ import co.elastic.clients.elasticsearch.indices.GetAliasResponse;
 import com.boyang.search.security.JwtVerifier;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -25,6 +26,9 @@ public class IndexAclGuard {
     private final IndexAliasResolver indexAliasResolver;
     private final IndexAclSubjectService indexAclSubjectService;
     private final ElasticsearchClient esClient;
+
+    @Value("${kb.index-acl.default-deny:false}")
+    private boolean defaultDenyWhenNoRules;
 
     public String filterReadableScope(String scope, JwtVerifier.UserIdentity identity) {
         String normalized = indexAliasResolver.normalizeReadScope(scope);
@@ -58,12 +62,22 @@ public class IndexAclGuard {
         if (!indexAliasResolver.isDocumentPhysicalIndex(indexName)) {
             return false;
         }
+        if (identity != null && identity.isSuperAdmin()) {
+            return true;
+        }
         IndexAclSubjectService.Decision decision = indexAclSubjectService.decide(indexName, identity, "READ");
         if (decision == IndexAclSubjectService.Decision.DENY) {
             return false;
         }
-        return decision == IndexAclSubjectService.Decision.ALLOW
-                || !indexAclSubjectService.hasRules(indexName, "READ");
+        if (decision == IndexAclSubjectService.Decision.ALLOW) {
+            return true;
+        }
+        boolean hasRules = indexAclSubjectService.hasRules(indexName, "READ");
+        if (!hasRules && defaultDenyWhenNoRules) {
+            log.debug("[IndexAclGuard] deny index without ACL rules index={} defaultDeny=true", indexName);
+            return false;
+        }
+        return !hasRules;
     }
 
     private List<String> expandReadAlias(String aliasName) {

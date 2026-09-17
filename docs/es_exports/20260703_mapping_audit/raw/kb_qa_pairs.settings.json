@@ -1,0 +1,23 @@
+{
+  "kb_qa_pairs": {
+    "settings": {
+      "index": {
+        "creation_date": "1776914639071",
+        "number_of_replicas": "1",
+        "number_of_shards": "1",
+        "provided_name": "kb_qa_pairs",
+        "routing": {
+          "allocation": {
+            "include": {
+              "_tier_preference": "data_content"
+            }
+          }
+        },
+        "uuid": "k4YwFFVNSOq0wOpmFm9ntA",
+        "version": {
+          "created": "8060299"
+        }
+      }
+    }
+  }
+}

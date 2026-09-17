@@ -10,8 +10,10 @@ import com.boyang.search.pipeline.SearchContext;
 import com.boyang.search.pipeline.SearchPipelineStep;
 import com.boyang.search.qa.QaAnswerProperties;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PostConstruct;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Semaphore;
@@ -31,8 +33,70 @@ public class RerankStep implements SearchPipelineStep {
     // [P1-1 修复] ColBERT 背压信号量：限制同时进入 ColBERT 的并发数（Spring @Component 单例，全局唯一）? //
     // 根因：高并发峰候多请求同时等待 ColBERT GPU 推理，将导致显存溢出 + 排队雪崩? // 基于公式：并?4 保证 GPU VRAM
     // 不溢（平?400MB/?x 4 = 1.6GB < 4B）? // tryAcquire 失败时降级为 RRF 排序，不阻断主链路
-    private static final int COLBERT_SEM_MAX = 4;
-    private static final Semaphore COLBERT_SEM = new Semaphore(COLBERT_SEM_MAX, true);
+    @Value("${ai.service.colbert-max-concurrency:${AI_COLBERT_MAX_CONCURRENCY:4}}")
+    private int configuredColbertMaxConcurrency = 4;
+
+    @Value("${ai.service.colbert-timeout-ms:${AI_COLBERT_TIMEOUT_MS:6000}}")
+    private long configuredColbertTimeoutMs = 6000L;
+
+    @Value("${ai.service.colbert-semantic-timeout-ms:${AI_COLBERT_SEMANTIC_TIMEOUT_MS:8000}}")
+    private long configuredColbertSemanticTimeoutMs = 8000L;
+
+    private int colbertMaxConcurrency = 4;
+    private Semaphore colbertSemaphore = new Semaphore(4, true);
+
+    @PostConstruct
+    void initColbertSemaphore() {
+        colbertMaxConcurrency = normalizeColbertMaxConcurrency(configuredColbertMaxConcurrency);
+        colbertSemaphore = new Semaphore(colbertMaxConcurrency, true);
+    }
+
+    /**
+     * 业务功能：标准化 ColBERT 并发上限配置。
+     * 关键流程：非法值回退默认 4，避免错误配置关闭背压或导致信号量不可用。
+     *
+     * @param configured 外部配置的 ColBERT 并发上限
+     * @return 可安全用于 Semaphore 的并发上限
+     */
+    int normalizeColbertMaxConcurrency(int configured) {
+        return configured > 0 ? configured : 4;
+    }
+
+    /**
+     * 业务功能：返回当前 ColBERT 并发上限。
+     * 关键流程：供降级日志和测试读取，避免日志继续引用硬编码常量。
+     *
+     * @return 当前生效的 ColBERT 并发上限
+     */
+    int getColbertMaxConcurrency() {
+        return colbertMaxConcurrency;
+    }
+
+    /**
+     * 业务功能：标准化 ColBERT 超时配置。
+     * 关键流程：非法值回退默认值，避免错误配置导致立即超时或无限等待。
+     *
+     * @param configured 外部配置的超时时间
+     * @param defaultValue 默认超时时间
+     * @return 可安全用于 CompletableFuture.get 的超时时间
+     */
+    long normalizeColbertTimeoutMs(long configured, long defaultValue) {
+        return configured > 0 ? configured : defaultValue;
+    }
+
+    /**
+     * 业务功能：按当前查询语义选择 ColBERT 超时时间。
+     * 关键流程：语义强制 rerank 使用更宽松超时；普通 rerank 使用默认超时，二者均支持外部配置。
+     *
+     * @param forceRerankForSemantics 是否为语义模式强制 rerank
+     * @return 当前请求应使用的 ColBERT 超时时间
+     */
+    long resolveColbertTimeoutMs(boolean forceRerankForSemantics) {
+        if (forceRerankForSemantics) {
+            return normalizeColbertTimeoutMs(configuredColbertSemanticTimeoutMs, 8000L);
+        }
+        return normalizeColbertTimeoutMs(configuredColbertTimeoutMs, 6000L);
+    }
 
     @Autowired
     private AiEngineGateway aiEngineGateway;
@@ -84,6 +148,14 @@ public class RerankStep implements SearchPipelineStep {
                     qaResult.put("organization", fileName);
                     qaResult.put("extracted_doc_id",
                             qaMeta != null ? (String) qaMeta.getOrDefault("doc_hash", "") : "");
+                    putFirstPresent(qaResult, "source_index", ftSource.get("source_index"),
+                            qaMeta != null ? qaMeta.get("source_index") : null);
+                    putFirstPresent(qaResult, "index_code", ftSource.get("index_code"),
+                            qaMeta != null ? qaMeta.get("index_code") : null);
+                    putFirstPresent(qaResult, "owner_unit_code", ftSource.get("owner_unit_code"),
+                            qaMeta != null ? qaMeta.get("owner_unit_code") : null);
+                    putFirstPresent(qaResult, "visible_unit_codes", ftSource.get("visible_unit_codes"),
+                            qaMeta != null ? qaMeta.get("visible_unit_codes") : null);
                     System.out.printf("[FastTrack-QA] 高置信 QA 返回: conf=%.3f file='%s'%n",
                             qaConf, fileName);
                     fastTrackResult.add(qaResult);
@@ -341,30 +413,30 @@ public class RerankStep implements SearchPipelineStep {
             context.setRerankInputCount(limitedDocs.size());
             boolean acquired = false;
             try {
-                acquired = COLBERT_SEM.tryAcquire(500, TimeUnit.MILLISECONDS);
+                acquired = colbertSemaphore.tryAcquire(500, TimeUnit.MILLISECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 context.setRerankDegraded(true);
             }
             if (acquired) {
                 try {
-                    long colbertTimeoutMs = forceRerankForSemantics ? 8000L : 6000L;
+                    long colbertTimeoutMs = resolveColbertTimeoutMs(forceRerankForSemantics);
                     rerankScores = CompletableFuture
                             .supplyAsync(() -> aiEngineGateway.fetchColbertScores(queryText, limitedDocs))
                             .get(colbertTimeoutMs, TimeUnit.MILLISECONDS);
                 } catch (TimeoutException te) {
                     context.setRerankDegraded(true);
-                    System.err.printf("[ColBERT] 超时(%dms)，降级 RRF 排序%n", forceRerankForSemantics ? 8000 : 6000);
+                    System.err.printf("[ColBERT] 超时(%dms)，降级 RRF 排序%n", resolveColbertTimeoutMs(forceRerankForSemantics));
                 } catch (Exception ex) {
                     context.setRerankDegraded(true);
                     System.err.println("[ColBERT] 调用异常，降?RRF 排序: " + ex.getMessage());
                 } finally {
-                    COLBERT_SEM.release(); // finally 保证必然释放，防止信号量泄漏
+                    colbertSemaphore.release(); // finally 保证必然释放，防止信号量泄漏
                 }
             } else {
                 context.setRerankDegraded(true);
                 context.setRerankSemaphoreRejected(true);
-                System.out.printf("[ColBERT Semaphore] 超出并发上限 %d，降?RRF 排序%n", COLBERT_SEM_MAX);
+                System.out.printf("[ColBERT Semaphore] 超出并发上限 %d，降?RRF 排序%n", getColbertMaxConcurrency());
             }
 
             // Collective Veto Logic
@@ -806,6 +878,17 @@ public class RerankStep implements SearchPipelineStep {
             Map<String, Object> source = (Map<String, Object>) docMap.get("_source");
             Map<String, Object> metaMap = source != null ? (Map<String, Object>) source.get("metadata") : null;
 
+            if (source != null) {
+                putFirstPresent(docMap, "source_index", source.get("source_index"),
+                        metaMap != null ? metaMap.get("source_index") : null);
+                putFirstPresent(docMap, "index_code", source.get("index_code"),
+                        metaMap != null ? metaMap.get("index_code") : null);
+                putFirstPresent(docMap, "owner_unit_code", source.get("owner_unit_code"),
+                        metaMap != null ? metaMap.get("owner_unit_code") : null);
+                putFirstPresent(docMap, "visible_unit_codes", source.get("visible_unit_codes"),
+                        metaMap != null ? metaMap.get("visible_unit_codes") : null);
+            }
+
             if (metaMap != null) {
                 // doc_id = 内容 hash 前缀（唯一标识，跨单位不冲突）
                 String docId = (String) docMap.getOrDefault("extracted_doc_id", "");
@@ -821,7 +904,9 @@ public class RerankStep implements SearchPipelineStep {
                 docMap.put("tags", metaMap.get("tags"));
                 docMap.put("custom_tags", metaMap.get("custom_keywords"));
                 // file_name 单独透传文件名（供前端显示 + file/preview 接口使用）
-                docMap.put("file_name", metaMap.getOrDefault("source", ""));
+                Object sourceName = metaMap.getOrDefault("source", "");
+                docMap.put("file_name", sourceName);
+                docMap.put("permission_guard_key", sourceName);
                 // dept 信息补充（供权限显示和调试）
                 docMap.put("dept_code", metaMap.getOrDefault("owner_dept_id", ""));
             }
@@ -836,6 +921,28 @@ public class RerankStep implements SearchPipelineStep {
 
         context.setFinalResult(results);
         System.out.println("====== [Pipeline] Node 6: Output Ready ======");
+    }
+
+    /**
+     * 将 QA/文档权限字段提升到最终响应顶层。
+     *
+     * <p>业务目的：RerankStep 在出站前会移除 ES 原始 {@code _source}，
+     * 如果权限字段只留在 {@code _source} 或 {@code metadata} 中，前端、审计和后续服务就无法稳定读取
+     * {@code source_index/index_code/owner_unit_code/visible_unit_codes}。</p>
+     *
+     * <p>关键流程：优先保留 Python/ES 顶层字段，缺失时使用 metadata 兜底；
+     * 空字符串不写入，避免把无效权限值伪装成已授权字段。</p>
+     */
+    private void putFirstPresent(Map<String, Object> target, String key, Object primary, Object fallback) {
+        Object value = primary != null ? primary : fallback;
+        if (value == null) {
+            return;
+        }
+        if (value instanceof String && ((String) value).trim().isEmpty()) {
+            return;
+        }
+        // _source 会在结果出站前被移除，权限字段必须提升到顶层，避免后续调用方丢失判定依据。
+        target.put(key, value);
     }
 
     @SuppressWarnings("unchecked")

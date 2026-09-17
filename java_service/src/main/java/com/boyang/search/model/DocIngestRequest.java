@@ -116,4 +116,15 @@ public class DocIngestRequest {
     /** 内存级文件数组，供 UPLOAD 模式处理。不被序列化与传输。 */
     @JsonIgnore
     private transient MultipartFile[] uploadFiles;
+
+    /**
+     * UPLOAD 模式：请求线程内同步读取的字节（与 {@link #uploadFiles} 同下标）。
+     * <p>
+     * 存在意义：MultipartFile 背后是 Tomcat 请求级临时文件，控制器返回后会被 cleanupMultipart() 删除。
+     * 若把 file::getInputStream 当作懒加载流交给异步线程读取，会随机命中「系统找不到指定的文件」竞态。
+     * 因此 ingest() 在 submit 之前（请求线程内）把字节固化进本字段，异步 worker 只依赖堆内字节，
+     * 彻底脱离临时文件生命周期。
+     */
+    @JsonIgnore
+    private transient byte[][] uploadFileBytes;
 }

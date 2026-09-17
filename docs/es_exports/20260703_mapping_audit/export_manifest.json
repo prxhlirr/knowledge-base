@@ -1,0 +1,118 @@
+{
+  "templates": [
+    "docs\\es_exports\\20260703_mapping_audit\\templates\\kb_document_template.json",
+    "docs\\es_exports\\20260703_mapping_audit\\templates\\kb_template.json"
+  ],
+  "indices": [
+    {
+      "docs.count": "22",
+      "index": "kb_document_public",
+      "pri": "1",
+      "rep": "0",
+      "status": "open",
+      "store.size": "515.9kb",
+      "mapping": "docs\\es_exports\\20260703_mapping_audit\\mappings\\kb_document_public.mapping.only.json",
+      "settings": "docs\\es_exports\\20260703_mapping_audit\\settings\\kb_document_public.settings.only.json"
+    },
+    {
+      "docs.count": "669",
+      "index": "kb_document_official",
+      "pri": "1",
+      "rep": "0",
+      "status": "open",
+      "store.size": "16mb",
+      "mapping": "docs\\es_exports\\20260703_mapping_audit\\mappings\\kb_document_official.mapping.only.json",
+      "settings": "docs\\es_exports\\20260703_mapping_audit\\settings\\kb_document_official.settings.only.json"
+    },
+    {
+      "docs.count": "13",
+      "index": "kb_doc_meta",
+      "pri": "1",
+      "rep": "1",
+      "status": "open",
+      "store.size": "339kb",
+      "mapping": "docs\\es_exports\\20260703_mapping_audit\\mappings\\kb_doc_meta.mapping.only.json",
+      "settings": "docs\\es_exports\\20260703_mapping_audit\\settings\\kb_doc_meta.settings.only.json"
+    },
+    {
+      "docs.count": "444",
+      "index": "kb_qa_pairs_v2",
+      "pri": "1",
+      "rep": "1",
+      "status": "open",
+      "store.size": "9.1mb",
+      "mapping": "docs\\es_exports\\20260703_mapping_audit\\mappings\\kb_qa_pairs_v2.mapping.only.json",
+      "settings": "docs\\es_exports\\20260703_mapping_audit\\settings\\kb_qa_pairs_v2.settings.only.json"
+    },
+    {
+      "docs.count": "0",
+      "index": "kb_document_law",
+      "pri": "1",
+      "rep": "0",
+      "status": "open",
+      "store.size": "139.7kb",
+      "mapping": "docs\\es_exports\\20260703_mapping_audit\\mappings\\kb_document_law.mapping.only.json",
+      "settings": "docs\\es_exports\\20260703_mapping_audit\\settings\\kb_document_law.settings.only.json"
+    },
+    {
+      "docs.count": "6",
+      "index": "kb_doc_meta_v2",
+      "pri": "1",
+      "rep": "0",
+      "status": "open",
+      "store.size": "216kb",
+      "mapping": "docs\\es_exports\\20260703_mapping_audit\\mappings\\kb_doc_meta_v2.mapping.only.json",
+      "settings": "docs\\es_exports\\20260703_mapping_audit\\settings\\kb_doc_meta_v2.settings.only.json"
+    },
+    {
+      "docs.count": "22",
+      "index": "kb_doc_search_v1",
+      "pri": "1",
+      "rep": "0",
+      "status": "open",
+      "store.size": "402.3kb",
+      "mapping": "docs\\es_exports\\20260703_mapping_audit\\mappings\\kb_doc_search_v1.mapping.only.json",
+      "settings": "docs\\es_exports\\20260703_mapping_audit\\settings\\kb_doc_search_v1.settings.only.json"
+    },
+    {
+      "docs.count": "0",
+      "index": "kb_document_notice",
+      "pri": "1",
+      "rep": "0",
+      "status": "open",
+      "store.size": "225b",
+      "mapping": "docs\\es_exports\\20260703_mapping_audit\\mappings\\kb_document_notice.mapping.only.json",
+      "settings": "docs\\es_exports\\20260703_mapping_audit\\settings\\kb_document_notice.settings.only.json"
+    },
+    {
+      "docs.count": "16",
+      "index": "kb_document_news",
+      "pri": "1",
+      "rep": "0",
+      "status": "open",
+      "store.size": "394.5kb",
+      "mapping": "docs\\es_exports\\20260703_mapping_audit\\mappings\\kb_document_news.mapping.only.json",
+      "settings": "docs\\es_exports\\20260703_mapping_audit\\settings\\kb_document_news.settings.only.json"
+    },
+    {
+      "docs.count": "0",
+      "index": "kb_document_v1",
+      "pri": "1",
+      "rep": "0",
+      "status": "open",
+      "store.size": "225b",
+      "mapping": "docs\\es_exports\\20260703_mapping_audit\\mappings\\kb_document_v1.mapping.only.json",
+      "settings": "docs\\es_exports\\20260703_mapping_audit\\settings\\kb_document_v1.settings.only.json"
+    },
+    {
+      "docs.count": "444",
+      "index": "kb_qa_pairs",
+      "pri": "1",
+      "rep": "1",
+      "status": "open",
+      "store.size": "9.1mb",
+      "mapping": "docs\\es_exports\\20260703_mapping_audit\\mappings\\kb_qa_pairs.mapping.only.json",
+      "settings": "docs\\es_exports\\20260703_mapping_audit\\settings\\kb_qa_pairs.settings.only.json"
+    }
+  ]
+}

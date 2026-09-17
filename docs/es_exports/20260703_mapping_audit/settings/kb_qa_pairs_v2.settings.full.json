@@ -1,0 +1,23 @@
+{
+  "kb_qa_pairs_v2": {
+    "settings": {
+      "index": {
+        "creation_date": "1783061579337",
+        "number_of_replicas": "1",
+        "number_of_shards": "1",
+        "provided_name": "kb_qa_pairs_v2",
+        "routing": {
+          "allocation": {
+            "include": {
+              "_tier_preference": "data_content"
+            }
+          }
+        },
+        "uuid": "ASXGcA7_TrGCz_zmCBUSSw",
+        "version": {
+          "created": "8060299"
+        }
+      }
+    }
+  }
+}

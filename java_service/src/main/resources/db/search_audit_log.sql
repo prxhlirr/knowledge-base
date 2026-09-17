@@ -75,6 +75,19 @@ ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS rerank_semaphore_re
 ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS llm_semaphore_rejected BOOLEAN DEFAULT false;
 ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS admin_bypass BOOLEAN DEFAULT false;
 ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS post_filter_denied_count INT DEFAULT 0;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS doc_search_enabled BOOLEAN DEFAULT false;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS doc_search_ms INT DEFAULT 0;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS doc_search_candidates INT DEFAULT 0;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS doc_search_prefilter_applied BOOLEAN DEFAULT false;
+
+-- Per-step pipeline timings (验证用)：把内存 timings map 中未落库的每步耗时持久化，
+-- 使 total_cost_ms 可被完整分解（residual → ~0），精确定位 keyword 等模式的瓶颈环节。
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS literal_recall_ms INT DEFAULT 0;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS keyword_doc_match_ms INT DEFAULT 0;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS coarse_evidence_ms INT DEFAULT 0;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS keyword_rank_ms INT DEFAULT 0;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS result_assemble_ms INT DEFAULT 0;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS permission_filter_ms INT DEFAULT 0;
 
 COMMENT ON TABLE public.search_audit_log
     IS 'Search audit log for latency, recall windows, degradation and permission observability.';

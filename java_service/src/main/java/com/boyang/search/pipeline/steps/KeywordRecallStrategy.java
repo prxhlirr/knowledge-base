@@ -51,7 +51,6 @@ import java.util.Set;
 @Component
 public class KeywordRecallStrategy implements RecallStrategy {
 
-    private static final int MAX_DOC_CANDIDATES = 500;
     private static final String DOC_KEY_FIELD = "metadata.source";
 
     @Autowired
@@ -77,6 +76,34 @@ public class KeywordRecallStrategy implements RecallStrategy {
      */
     @Value("${search.keyword.legacy-wildcard.enabled:false}")
     private boolean legacyWildcardEnabled;
+
+    /**
+     * 业务功能：控制 keyword 在 kb_doc_search 无结果或异常时是否回退到旧 chunk collapse 召回。
+     * 设计原因：亿级数据下旧 chunk 召回是重路径，默认关闭；仅用于灰度回滚或应急排障时显式开启。
+     */
+    @Value("${search.keyword.legacy-fallback.enabled:false}")
+    private boolean legacyFallbackEnabled;
+
+    /**
+     * 业务功能：控制 keyword 文档候选枚举的最大窗口。
+     * 设计原因：亿级数据下候选窗口直接决定 ES 压力，必须能按索引规模和 SLA 动态调节。
+     */
+    @Value("${search.keyword.doc-candidate-max:${SEARCH_KEYWORD_DOC_CANDIDATE_MAX:500}}")
+    private String keywordDocCandidateMax = "500";
+
+    /**
+     * 业务功能：控制 keyword 文档候选枚举的最小窗口。
+     * 设计原因：小 topK 请求仍需保留一定候选余量，避免多词交集过早丢召回。
+     */
+    @Value("${search.keyword.doc-candidate-min:${SEARCH_KEYWORD_DOC_CANDIDATE_MIN:120}}")
+    private String keywordDocCandidateMin = "120";
+
+    /**
+     * 业务功能：控制 keyword 文档候选窗口相对 topK 的放大倍数。
+     * 设计原因：不同业务索引的关键词稀疏度不同，固定 topK*12 无法适配所有生产负载。
+     */
+    @Value("${search.keyword.doc-candidate-multiplier:${SEARCH_KEYWORD_DOC_CANDIDATE_MULTIPLIER:12}}")
+    private String keywordDocCandidateMultiplier = "12";
 
     @Override
     public void recall(SearchContext context) throws Exception {
@@ -115,85 +142,51 @@ public class KeywordRecallStrategy implements RecallStrategy {
         boolean useDocSearch = docSearchEnabled && docSearchKeywordEnabled;
         long docSearchStart = System.currentTimeMillis();
         Map<String, Set<String>> docIdsByTerm;
+        boolean legacyFallbackUsed = false;
         if (useDocSearch) {
-            // [性能优化] 双索引并行查询：新索引和旧索引同时执行,消除串行等待。
-            // 原逻辑：先查新索引 → 无交集 → 再查旧索引（串行,最差 2x 延迟）
-            // 优化后：两个索引并行查询 → 新索引优先 → 无交集时直接用旧索引结果（已就绪）
-            //
-            // [并发安全修复] 原实现用 static 字段 ThreadLocalHolder 在异步线程与主线程间传递
-            // sources/scores，但它并非真正的 ThreadLocal（static 共享可变），并发请求会互相覆盖，
-            // 导致 hasIntersection 误判、错退回更慢的旧索引路径。改为从 Future 返回一个不可变 holder。
-            Map<String, Map<String, Object>> legacyDocSourcesById = new LinkedHashMap<>();
-            Map<String, Double> legacyDocScoresById = new HashMap<>();
-
-            java.util.concurrent.CompletableFuture<RecallResult> newIndexFuture =
-                    com.boyang.search.util.AsyncContextUtil.supplyAsync(() -> {
-                        com.boyang.search.security.UserContextHolder.setIdentity(
-                                com.boyang.search.security.UserContextHolder.getIdentity());
-                        try {
-                            Map<String, Map<String, Object>> newSources = new LinkedHashMap<>();
-                            Map<String, Double> newScores = new HashMap<>();
-                            Map<String, Set<String>> result = searchCandidateDocsByTerm(docSearchIndex, requiredTerms,
-                                    getEsTimeoutMs(config), isAnonymous, finalUserId, deptValues, forceSource,
-                                    newSources, newScores, context.getRecallTopK());
-                            return new RecallResult(result, newSources, newScores);
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        } finally {
-                            com.boyang.search.security.UserContextHolder.clear();
-                        }
-                    });
-
-            // 旧索引在当前线程同步执行（与异步新索引并行）
-            Map<String, Set<String>> legacyDocIdsByTerm = searchLegacyCandidateDocsByTerm(indexPattern, requiredTerms,
-                    getEsTimeoutMs(config), isAnonymous, finalUserId, deptValues, forceSource,
-                    legacyDocSourcesById, legacyDocScoresById, context.getRecallTopK());
-
-            // 等待新索引结果
-            RecallResult newIndexResult;
+            RecallResult newIndexResult = null;
             try {
-                newIndexResult = newIndexFuture.get(3_000, java.util.concurrent.TimeUnit.MILLISECONDS);
+                Map<String, Map<String, Object>> newSources = new LinkedHashMap<>();
+                Map<String, Double> newScores = new HashMap<>();
+                Map<String, Set<String>> result = searchCandidateDocsByTerm(docSearchIndex, requiredTerms,
+                        getEsTimeoutMs(config), isAnonymous, finalUserId, deptValues, forceSource, indexPattern,
+                        newSources, newScores, context.getRecallTopK());
+                newIndexResult = new RecallResult(result, newSources, newScores);
             } catch (Exception e) {
-                System.err.println("[KeywordStrategy] 新索引并行查询超时/失败,使用旧索引结果: " + e.getMessage());
-                newIndexResult = null;
+                System.err.println("[KeywordStrategy] kb_doc_search 查询失败: " + e.getMessage());
             }
             Map<String, Set<String>> newIndexDocIdsByTerm =
                     newIndexResult != null ? newIndexResult.docIdsByTerm : Collections.emptyMap();
 
-            // 检查新索引交集
-            boolean hasIntersection = false;
-            if (newIndexDocIdsByTerm != null && !newIndexDocIdsByTerm.isEmpty()) {
-                Set<String> intersection = null;
-                for (Set<String> set : newIndexDocIdsByTerm.values()) {
-                    if (intersection == null) {
-                        intersection = new java.util.HashSet<>(set);
-                    } else {
-                        intersection.retainAll(set);
-                    }
-                }
-                hasIntersection = (intersection != null && !intersection.isEmpty());
-            }
-
-            if (hasIntersection && newIndexResult != null) {
-                // 新索引有交集,优先使用
+            if (hasIntersection(newIndexDocIdsByTerm) && newIndexResult != null) {
                 docIdsByTerm = newIndexDocIdsByTerm;
                 docSourcesById.putAll(newIndexResult.sources);
                 docScoresById.putAll(newIndexResult.scores);
                 useDocSearch = true;
-            } else {
-                // 新索引无交集,使用已并行完成的旧索引结果
-                System.out.println("[KeywordStrategy] 新索引交集结果为空,使用并行执行的旧索引结果");
-                docIdsByTerm = legacyDocIdsByTerm;
+            } else if (legacyFallbackEnabled) {
+                System.out.println("[KeywordStrategy] kb_doc_search 无交集，显式开启 legacy fallback，回退旧 chunk 召回");
+                Map<String, Map<String, Object>> legacyDocSourcesById = new LinkedHashMap<>();
+                Map<String, Double> legacyDocScoresById = new HashMap<>();
+                docIdsByTerm = searchLegacyCandidateDocsByTerm(indexPattern, requiredTerms,
+                        getEsTimeoutMs(config), isAnonymous, finalUserId, deptValues, forceSource,
+                        legacyDocSourcesById, legacyDocScoresById, context.getRecallTopK());
                 docSourcesById.putAll(legacyDocSourcesById);
                 docScoresById.putAll(legacyDocScoresById);
+                legacyFallbackUsed = true;
                 useDocSearch = false;
+            } else {
+                System.out.println("[KeywordStrategy] kb_doc_search 无交集，legacy fallback 未开启，返回空候选");
+                docIdsByTerm = newIndexDocIdsByTerm != null ? newIndexDocIdsByTerm : Collections.emptyMap();
+                useDocSearch = true;
             }
         } else {
             docIdsByTerm = searchLegacyCandidateDocsByTerm(indexPattern, requiredTerms,
                     getEsTimeoutMs(config), isAnonymous, finalUserId, deptValues, forceSource,
                     docSourcesById, docScoresById, context.getRecallTopK());
+            legacyFallbackUsed = true;
         }
         context.getTimings().put("doc_search_enabled", useDocSearch ? 1 : 0);
+        context.getTimings().put("keyword_legacy_fallback", legacyFallbackUsed ? 1 : 0);
         context.getTimings().put("doc_search_keyword_ms", System.currentTimeMillis() - docSearchStart);
         context.getTimings().put("doc_search_keyword_candidates", docSourcesById.size());
 
@@ -216,21 +209,47 @@ public class KeywordRecallStrategy implements RecallStrategy {
             requiredTerms, docSourcesById.size());
     }
 
-    private Map<String, Set<String>> searchLegacyCandidateDocsByTerm(String indexPattern,
-                                                                     List<String> requiredTerms,
-                                                                     int timeoutMs,
-                                                                     boolean isAnonymous,
-                                                                     String finalUserId,
-                                                                     List<FieldValue> deptValues,
-                                                                     String forceSource,
-                                                                     Map<String, Map<String, Object>> docSourcesById,
-                                                                     Map<String, Double> docScoresById,
-                                                                     int topK) throws Exception {
+    /**
+     * 判断多关键词文档候选是否存在交集。
+     * 业务功能：keyword 文档级召回必须满足所有 required term 都能命中文档，避免单词命中扩大候选范围。
+     * 关键流程：逐个关键词集合求交集，交集非空才进入后续 chunk evidence 回表。
+     */
+    boolean hasIntersection(Map<String, Set<String>> docIdsByTerm) {
+        if (docIdsByTerm == null || docIdsByTerm.isEmpty()) {
+            return false;
+        }
+        Set<String> intersection = null;
+        for (Set<String> set : docIdsByTerm.values()) {
+            if (set == null || set.isEmpty()) {
+                return false;
+            }
+            if (intersection == null) {
+                intersection = new java.util.HashSet<>(set);
+            } else {
+                intersection.retainAll(set);
+            }
+            if (intersection.isEmpty()) {
+                return false;
+            }
+        }
+        return intersection != null && !intersection.isEmpty();
+    }
+
+    Map<String, Set<String>> searchLegacyCandidateDocsByTerm(String indexPattern,
+                                                             List<String> requiredTerms,
+                                                             int timeoutMs,
+                                                             boolean isAnonymous,
+                                                             String finalUserId,
+                                                             List<FieldValue> deptValues,
+                                                             String forceSource,
+                                                             Map<String, Map<String, Object>> docSourcesById,
+                                                             Map<String, Double> docScoresById,
+                                                             int topK) throws Exception {
         Map<String, Set<String>> docIdsByTerm = new LinkedHashMap<>();
         if (requiredTerms == null || requiredTerms.isEmpty()) {
             return docIdsByTerm;
         }
-        int size = Math.min(MAX_DOC_CANDIDATES, Math.max(topK * 12, 120));
+        int size = resolveKeywordCandidateSize(topK);
         List<RequestItem> searches = new ArrayList<>();
         for (String term : requiredTerms) {
             docIdsByTerm.put(term, new LinkedHashSet<>());
@@ -256,27 +275,28 @@ public class KeywordRecallStrategy implements RecallStrategy {
         return docIdsByTerm;
     }
 
-    private Map<String, Set<String>> searchCandidateDocsByTerm(String indexPattern,
-                                                               List<String> requiredTerms,
-                                                               int timeoutMs,
-                                                               boolean isAnonymous,
-                                                               String finalUserId,
-                                                               List<FieldValue> deptValues,
-                                                               String forceSource,
-                                                               Map<String, Map<String, Object>> docSourcesById,
-                                                               Map<String, Double> docScoresById,
-                                                               int topK) throws Exception {
+    Map<String, Set<String>> searchCandidateDocsByTerm(String indexPattern,
+                                                       List<String> requiredTerms,
+                                                       int timeoutMs,
+                                                       boolean isAnonymous,
+                                                       String finalUserId,
+                                                       List<FieldValue> deptValues,
+                                                       String forceSource,
+                                                       String readableSourceIndexPattern,
+                                                       Map<String, Map<String, Object>> docSourcesById,
+                                                       Map<String, Double> docScoresById,
+                                                       int topK) throws Exception {
         Map<String, Set<String>> docIdsByTerm = new LinkedHashMap<>();
         if (requiredTerms == null || requiredTerms.isEmpty()) {
             return docIdsByTerm;
         }
 
-        int size = Math.min(MAX_DOC_CANDIDATES, Math.max(topK * 12, 120));
+        int size = resolveKeywordCandidateSize(topK);
         List<RequestItem> searches = new ArrayList<>();
         for (String term : requiredTerms) {
             docIdsByTerm.put(term, new LinkedHashSet<>());
             searches.add(buildCandidateDocsRequestItem(indexPattern, term, timeoutMs,
-                    isAnonymous, finalUserId, deptValues, forceSource, size));
+                    isAnonymous, finalUserId, deptValues, forceSource, readableSourceIndexPattern, size));
         }
 
         MsearchRequest request = new MsearchRequest.Builder()
@@ -312,9 +332,10 @@ public class KeywordRecallStrategy implements RecallStrategy {
                                                       String finalUserId,
                                                       List<FieldValue> deptValues,
                                                       String forceSource,
+                                                      String readableSourceIndexPattern,
                                                       int size) {
         return new RequestItem.Builder()
-            .header(h -> h.index(indexPattern))
+            .header(h -> h.index(msearchIndices(indexPattern)))
             .body(b -> b
                 .trackTotalHits(h -> h.enabled(false))
                 .size(size)
@@ -334,7 +355,12 @@ public class KeywordRecallStrategy implements RecallStrategy {
                         "visibility",
                         "publish_time",
                         "owner_dept_id",
-                        "acl_tokens"
+                        "acl_tokens",
+                        "source_index",
+                        "index_code",
+                        "owner_unit_code",
+                        "visible_unit_codes",
+                        "permission_version"
                 )))
                 .query(q -> q.bool(bool -> {
                     bool.must(m -> buildTermMatchQuery(m, term));
@@ -345,6 +371,7 @@ public class KeywordRecallStrategy implements RecallStrategy {
                     ));
                     // kb_doc_search 索引使用顶层字段,需使用专用权限过滤器
                     bool.filter(utils.buildDocSearchPermFilter(isAnonymous, finalUserId, deptValues));
+                    bool.filter(utils.buildDocSearchSourceIndexFilter(readableSourceIndexPattern));
                     if (forceSource != null && !forceSource.isEmpty()) {
                         bool.filter(f -> f.term(t -> t.field("data_source").value(forceSource)));
                     }
@@ -363,7 +390,7 @@ public class KeywordRecallStrategy implements RecallStrategy {
                                                             String forceSource,
                                                             int size) {
         return new RequestItem.Builder()
-            .header(h -> h.index(indexPattern))
+            .header(h -> h.index(msearchIndices(indexPattern)))
             .body(b -> b
                 .trackTotalHits(h -> h.enabled(false))
                 .size(size)
@@ -381,7 +408,17 @@ public class KeywordRecallStrategy implements RecallStrategy {
                         "metadata.visibility",
                         "metadata.publish_time",
                         "metadata.owner_dept_id",
-                        "metadata.custom_keywords"
+                        "metadata.custom_keywords",
+                        "source_index",
+                        "index_code",
+                        "owner_unit_code",
+                        "visible_unit_codes",
+                        "permission_version",
+                        "metadata.source_index",
+                        "metadata.index_code",
+                        "metadata.owner_unit_code",
+                        "metadata.visible_unit_codes",
+                        "metadata.permission_version"
                 )))
                 .collapse(c -> c.field(DOC_KEY_FIELD))
                 .query(q -> q.bool(bool -> {
@@ -412,7 +449,7 @@ public class KeywordRecallStrategy implements RecallStrategy {
                                             Map<String, Double> docScoresById,
                                             int topK) throws Exception {
         Set<String> docIds = new LinkedHashSet<>();
-        int size = Math.min(MAX_DOC_CANDIDATES, Math.max(topK * 12, 120));
+        int size = resolveKeywordCandidateSize(topK);
         SearchRequest request = buildCandidateDocsRequest(indexPattern, term, timeoutMs,
                 isAnonymous, finalUserId, deptValues, forceSource, size);
         System.out.println("[KeywordStrategy] term='" + term + "' bounded candidate DSL: " + request);
@@ -424,6 +461,30 @@ public class KeywordRecallStrategy implements RecallStrategy {
 
         collectCandidateHits(response, docIds, docSourcesById, docScoresById);
         return docIds;
+    }
+
+    /**
+     * 业务功能：将逗号分隔的索引表达式转换为 MSearch header 可识别的索引列表。
+     * 关键流程：MSearch header 传入单个逗号字符串时，ES 会把它当成一个物理索引名；
+     * keyword 召回在 legacy kb_document_* 降级路径中必须显式拆分，避免跨索引召回整体失败。
+     */
+    List<String> msearchIndices(String indexPattern) {
+        List<String> indices = new ArrayList<>();
+        String raw = stringValue(indexPattern).trim();
+        if (raw.isEmpty()) {
+            indices.add(docSearchIndex);
+            return indices;
+        }
+        for (String part : raw.split(",")) {
+            String index = part.trim();
+            if (!index.isEmpty()) {
+                indices.add(index);
+            }
+        }
+        if (indices.isEmpty()) {
+            indices.add(docSearchIndex);
+        }
+        return indices;
     }
 
     private void collectCandidateHits(SearchResponse<Object> response,
@@ -495,7 +556,17 @@ public class KeywordRecallStrategy implements RecallStrategy {
                     "metadata.visibility",
                     "metadata.publish_time",
                     "metadata.owner_dept_id",
-                    "metadata.custom_keywords"
+                    "metadata.custom_keywords",
+                    "source_index",
+                    "index_code",
+                    "owner_unit_code",
+                    "visible_unit_codes",
+                    "permission_version",
+                    "metadata.source_index",
+                    "metadata.index_code",
+                    "metadata.owner_unit_code",
+                    "metadata.visible_unit_codes",
+                    "metadata.permission_version"
             )))
             .collapse(c -> c.field(DOC_KEY_FIELD))
             .query(q -> q.bool(b -> {
@@ -520,6 +591,10 @@ public class KeywordRecallStrategy implements RecallStrategy {
         return m.bool(ib -> {
             ib.should(s -> s.matchPhrase(mp -> mp.field("doc_terms").query(term).slop(0).boost(6.0f)));
             ib.should(s -> s.matchPhrase(mp -> mp.field("summary").query(term).slop(0).boost(1.2f)));
+            if (shouldUseShortChinesePrefix(term)) {
+                ib.should(s -> s.matchPhrasePrefix(mp -> mp.field("doc_terms").query(term).boost(5.0f)));
+                ib.should(s -> s.matchPhrasePrefix(mp -> mp.field("summary").query(term).boost(1.0f)));
+            }
             ib.should(s -> s.matchPhrase(mp -> mp.field("title").query(term).slop(0).boost(10.0f)));
             ib.should(s -> s.term(t -> t.field("title.keyword").value(term).boost(18.0f)));
             ib.should(s -> s.term(t -> t.field("source").value(term).boost(16.0f)));
@@ -574,6 +649,20 @@ public class KeywordRecallStrategy implements RecallStrategy {
             return false;
         }
         return true;
+    }
+
+    /**
+     * 业务功能：识别需要前缀兜底的短中文关键词。
+     * 关键流程：只放行 2-6 个连续中文字符，避免单字和英文数字查询扩大候选面。
+     */
+    boolean shouldUseShortChinesePrefix(String term) {
+        if (term == null) {
+            return false;
+        }
+        String trimmed = term.trim();
+        return trimmed.length() >= 2
+                && trimmed.length() <= 6
+                && trimmed.matches("[\\u4e00-\\u9fa5]+");
     }
 
     @SuppressWarnings("unchecked")
@@ -669,6 +758,27 @@ public class KeywordRecallStrategy implements RecallStrategy {
 
     private int getEsTimeoutMs(SysAiTuningConfig config) {
         return config != null && config.getEsQueryTimeout() != null ? config.getEsQueryTimeout() : 2000;
+    }
+
+    int resolveKeywordCandidateSize(int topK) {
+        int maxCandidates = resolvePositiveInt(keywordDocCandidateMax, 500);
+        int minCandidates = resolvePositiveInt(keywordDocCandidateMin, 120);
+        int multiplier = resolvePositiveInt(keywordDocCandidateMultiplier, 12);
+        int safeTopK = Math.max(1, topK);
+        int expanded = Math.max(safeTopK * multiplier, minCandidates);
+        return Math.min(maxCandidates, expanded);
+    }
+
+    int resolvePositiveInt(String configured, int defaultValue) {
+        if (configured == null) {
+            return defaultValue;
+        }
+        try {
+            int parsed = Integer.parseInt(configured.trim());
+            return parsed > 0 ? parsed : defaultValue;
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
     }
 
     /**

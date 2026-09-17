@@ -6,6 +6,7 @@ import com.boyang.search.pipeline.SearchContext;
 import com.boyang.search.pipeline.SearchPipelineStep;
 import com.boyang.search.service.SysAiTuningConfigService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
@@ -34,6 +35,34 @@ public class VectorFetchStep implements SearchPipelineStep {
     // [P1 优化⑧] 搜索查询级缓存：缓存 dense/sparse 向量，避免重复查询重复编码
     @Autowired
     private com.boyang.search.util.SearchQueryCache searchQueryCache;
+
+    /**
+     * 业务功能：控制文档类型查询专属 HyDE 的等待时间。
+     * 设计原因：文档类型 HyDE 质量收益高，但生产环境不同模型延迟差异大，必须允许按环境调节。
+     */
+    @Value("${search.vector.doc-type-hyde-timeout-ms:${SEARCH_VECTOR_DOC_TYPE_HYDE_TIMEOUT_MS:4000}}")
+    private String docTypeHydeTimeoutMs = "4000";
+
+    /**
+     * 业务功能：控制文档类型查询原始 dense/sparse 向量的等待时间。
+     * 设计原因：该向量是 HyDE 失败后的兜底来源，独立配置可以保护前置向量化链路延迟。
+     */
+    @Value("${search.vector.doc-type-dual-timeout-ms:${SEARCH_VECTOR_DOC_TYPE_DUAL_TIMEOUT_MS:3000}}")
+    private String docTypeDualTimeoutMs = "3000";
+
+    /**
+     * 业务功能：控制普通长查询 HyDE 的快速等待时间。
+     * 设计原因：普通 HyDE 超时后可退回原始向量，过长等待会直接损害检索 SLA。
+     */
+    @Value("${search.vector.hyde-timeout-ms:${SEARCH_VECTOR_HYDE_TIMEOUT_MS:1000}}")
+    private String hydeTimeoutMs = "1000";
+
+    /**
+     * 业务功能：控制普通长查询原始 dense/sparse 向量的等待时间。
+     * 设计原因：该请求决定 KNN 与 Sparse 是否能继续执行，需要按 AI 服务吞吐动态调整。
+     */
+    @Value("${search.vector.dual-timeout-ms:${SEARCH_VECTOR_DUAL_TIMEOUT_MS:3000}}")
+    private String dualTimeoutMs = "3000";
 
     @Override
     public void execute(SearchContext context) throws Exception {
@@ -74,9 +103,10 @@ public class VectorFetchStep implements SearchPipelineStep {
                 // HyDE timeout：从 2s 延长到 4000ms。
                 // 接入云模型（如 SiliconFlow）时生成完整的假设文档通常耗时更长，
                 // 2000ms 极易因为网络抖动导致首抽出现 TimeoutException 从而跳过 HyDE。
-                mergedResult = hydeFuture.get(4_000, TimeUnit.MILLISECONDS);
+                int timeoutMs = resolveDocTypeHydeTimeoutMs();
+                mergedResult = hydeFuture.get(timeoutMs, TimeUnit.MILLISECONDS);
             } catch (Exception e) {
-                System.err.println("[VectorFetchStep] DocType HyDE 4000ms 超时，降级使用 BGE 原始向量");
+                System.err.println("[VectorFetchStep] DocType HyDE 超时，降级使用 BGE 原始向量");
                 hydeFuture.cancel(true);
                 mergedResult = new java.util.HashMap<>();
                 mergedResult.put("rewritten_query", queryForMerged);
@@ -90,7 +120,7 @@ public class VectorFetchStep implements SearchPipelineStep {
             // [性能优化] 从 fetchDualVector 提取 dense + sparse
             List<Double> origVector = null;
             try {
-                Map<String, Object> dualResult = docTypeDualFuture.get(3_000, TimeUnit.MILLISECONDS);
+                Map<String, Object> dualResult = docTypeDualFuture.get(resolveDocTypeDualTimeoutMs(), TimeUnit.MILLISECONDS);
                 if (dualResult != null) {
                     origVector = (List<Double>) dualResult.get("dense");
                     @SuppressWarnings("unchecked")
@@ -220,9 +250,9 @@ public class VectorFetchStep implements SearchPipelineStep {
                 // 策略：1s 内未返回则用 BGE 直接向量兜底（origVecFuture 已并发跑完）。
                 // Python 侧 rewrite_and_hyde 已改为后台线程继续跑 Qwen + 写缓存，
                 // 相同查询第二次请求命中缓存，0ms 获取 HyDE 优化向量，质量不损失。
-                mergedResult = hydeFuture.get(1_000, TimeUnit.MILLISECONDS);
+                mergedResult = hydeFuture.get(resolveHydeTimeoutMs(), TimeUnit.MILLISECONDS);
             } catch (Exception e) {
-                System.err.println("[VectorFetchStep] HyDE 1s 超时，降级使用 BGE 原始向量（Python 后台继续预热缓存）。");
+                System.err.println("[VectorFetchStep] HyDE 超时，降级使用 BGE 原始向量（Python 后台继续预热缓存）。");
                 hydeFuture.cancel(true);
                 mergedResult = new HashMap<>();
                 mergedResult.put("rewritten_query", queryForMerged);
@@ -237,7 +267,7 @@ public class VectorFetchStep implements SearchPipelineStep {
             // [性能优化] 从 fetchDualVector 结果中提取 dense + sparse
             List<Double> origVector = null;
             try {
-                Map<String, Object> dualResult = dualFuture.get(3_000, TimeUnit.MILLISECONDS);
+                Map<String, Object> dualResult = dualFuture.get(resolveDualTimeoutMs(), TimeUnit.MILLISECONDS);
                 if (dualResult != null) {
                     origVector = (List<Double>) dualResult.get("dense");
                     @SuppressWarnings("unchecked")
@@ -287,6 +317,34 @@ public class VectorFetchStep implements SearchPipelineStep {
             System.out.println("  - Vector Generated with Size: " + queryVector.size());
         } else {
             System.out.println("  - Vector is NULL/Empty (Skipped or Error)");
+        }
+    }
+
+    int resolveDocTypeHydeTimeoutMs() {
+        return resolvePositiveTimeoutMs(docTypeHydeTimeoutMs, 4000);
+    }
+
+    int resolveDocTypeDualTimeoutMs() {
+        return resolvePositiveTimeoutMs(docTypeDualTimeoutMs, 3000);
+    }
+
+    int resolveHydeTimeoutMs() {
+        return resolvePositiveTimeoutMs(hydeTimeoutMs, 1000);
+    }
+
+    int resolveDualTimeoutMs() {
+        return resolvePositiveTimeoutMs(dualTimeoutMs, 3000);
+    }
+
+    int resolvePositiveTimeoutMs(String configured, int defaultValue) {
+        if (configured == null) {
+            return defaultValue;
+        }
+        try {
+            int parsed = Integer.parseInt(configured.trim());
+            return parsed > 0 ? parsed : defaultValue;
+        } catch (NumberFormatException ex) {
+            return defaultValue;
         }
     }
 

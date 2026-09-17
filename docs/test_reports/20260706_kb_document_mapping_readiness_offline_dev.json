@@ -1,0 +1,1316 @@
+{
+  "indicesPattern": "kb_document_*",
+  "productionMode": false,
+  "source": "export:docs\\es_exports\\20260703_mapping_audit\\raw",
+  "indices": {
+    "kb_document_law": {
+      "index": "kb_document_law",
+      "ready": false,
+      "errors": [
+        {
+          "severity": "error",
+          "index": "kb_document_law",
+          "field": "acl_tokens",
+          "code": "type_mismatch",
+          "expected": "keyword",
+          "actual": "text",
+          "message": "acl_tokens 类型应为 keyword，实际为 text"
+        },
+        {
+          "severity": "error",
+          "index": "kb_document_law",
+          "field": "metadata.source_index",
+          "code": "type_mismatch",
+          "expected": "keyword",
+          "actual": "text",
+          "message": "metadata.source_index 类型应为 keyword，实际为 text"
+        },
+        {
+          "severity": "error",
+          "index": "kb_document_law",
+          "field": "metadata.visible_unit_codes",
+          "code": "type_mismatch",
+          "expected": "keyword",
+          "actual": "text",
+          "message": "metadata.visible_unit_codes 类型应为 keyword，实际为 text"
+        }
+      ],
+      "warnings": [
+        {
+          "severity": "warning",
+          "index": "kb_document_law",
+          "field": "settings.number_of_shards",
+          "code": "single_primary_shard",
+          "actual": 1,
+          "message": "当前为单主分片，亿级数据前必须做容量评估并按业务索引拆分配置"
+        },
+        {
+          "severity": "warning",
+          "index": "kb_document_law",
+          "field": "settings.number_of_replicas",
+          "code": "zero_replica",
+          "actual": 0,
+          "message": "副本数为 0，生产环境无高可用"
+        }
+      ],
+      "fields": {
+        "content": {
+          "exists": true,
+          "actual": {
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart",
+            "type": "text"
+          },
+          "expected": {
+            "required": true,
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          }
+        },
+        "display_content": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": false,
+            "type": "text"
+          }
+        },
+        "vector": {
+          "exists": true,
+          "actual": {
+            "dims": 1024,
+            "index": true,
+            "similarity": "cosine",
+            "type": "dense_vector"
+          },
+          "expected": {
+            "required": true,
+            "type": "dense_vector",
+            "dims": 1024,
+            "similarity": "cosine",
+            "index": true
+          }
+        },
+        "sparse_vector": {
+          "exists": true,
+          "actual": {
+            "type": "rank_features"
+          },
+          "expected": {
+            "required": false,
+            "type": "rank_features"
+          }
+        },
+        "acl_tokens": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "source_index": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "index_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "owner_unit_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "visible_unit_codes": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "permission_version": {
+          "exists": true,
+          "actual": {
+            "type": "long"
+          },
+          "expected": {
+            "required": true,
+            "type": "long"
+          }
+        },
+        "metadata.is_latest": {
+          "exists": true,
+          "actual": {
+            "type": "boolean"
+          },
+          "expected": {
+            "required": true,
+            "type": "boolean"
+          }
+        },
+        "metadata.doc_version": {
+          "exists": true,
+          "actual": {
+            "type": "integer"
+          },
+          "expected": {
+            "required": true,
+            "type": "integer"
+          }
+        },
+        "metadata.acl_tokens": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.source_index": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.visible_unit_codes": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.permission_version": {
+          "exists": true,
+          "actual": {
+            "type": "long"
+          },
+          "expected": {
+            "required": false,
+            "type": "long"
+          }
+        }
+      }
+    },
+    "kb_document_news": {
+      "index": "kb_document_news",
+      "ready": false,
+      "errors": [
+        {
+          "severity": "error",
+          "index": "kb_document_news",
+          "field": "acl_tokens",
+          "code": "type_mismatch",
+          "expected": "keyword",
+          "actual": "text",
+          "message": "acl_tokens 类型应为 keyword，实际为 text"
+        },
+        {
+          "severity": "error",
+          "index": "kb_document_news",
+          "field": "metadata.source_index",
+          "code": "type_mismatch",
+          "expected": "keyword",
+          "actual": "text",
+          "message": "metadata.source_index 类型应为 keyword，实际为 text"
+        },
+        {
+          "severity": "error",
+          "index": "kb_document_news",
+          "field": "metadata.visible_unit_codes",
+          "code": "type_mismatch",
+          "expected": "keyword",
+          "actual": "text",
+          "message": "metadata.visible_unit_codes 类型应为 keyword，实际为 text"
+        }
+      ],
+      "warnings": [
+        {
+          "severity": "warning",
+          "index": "kb_document_news",
+          "field": "settings.number_of_shards",
+          "code": "single_primary_shard",
+          "actual": 1,
+          "message": "当前为单主分片，亿级数据前必须做容量评估并按业务索引拆分配置"
+        },
+        {
+          "severity": "warning",
+          "index": "kb_document_news",
+          "field": "settings.number_of_replicas",
+          "code": "zero_replica",
+          "actual": 0,
+          "message": "副本数为 0，生产环境无高可用"
+        }
+      ],
+      "fields": {
+        "content": {
+          "exists": true,
+          "actual": {
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart",
+            "type": "text"
+          },
+          "expected": {
+            "required": true,
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          }
+        },
+        "display_content": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": false,
+            "type": "text"
+          }
+        },
+        "vector": {
+          "exists": true,
+          "actual": {
+            "dims": 1024,
+            "index": true,
+            "similarity": "cosine",
+            "type": "dense_vector"
+          },
+          "expected": {
+            "required": true,
+            "type": "dense_vector",
+            "dims": 1024,
+            "similarity": "cosine",
+            "index": true
+          }
+        },
+        "sparse_vector": {
+          "exists": true,
+          "actual": {
+            "type": "rank_features"
+          },
+          "expected": {
+            "required": false,
+            "type": "rank_features"
+          }
+        },
+        "acl_tokens": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "source_index": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "index_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "owner_unit_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "visible_unit_codes": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "permission_version": {
+          "exists": true,
+          "actual": {
+            "type": "long"
+          },
+          "expected": {
+            "required": true,
+            "type": "long"
+          }
+        },
+        "metadata.is_latest": {
+          "exists": true,
+          "actual": {
+            "type": "boolean"
+          },
+          "expected": {
+            "required": true,
+            "type": "boolean"
+          }
+        },
+        "metadata.doc_version": {
+          "exists": true,
+          "actual": {
+            "type": "integer"
+          },
+          "expected": {
+            "required": true,
+            "type": "integer"
+          }
+        },
+        "metadata.acl_tokens": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.source_index": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.visible_unit_codes": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.permission_version": {
+          "exists": true,
+          "actual": {
+            "type": "long"
+          },
+          "expected": {
+            "required": false,
+            "type": "long"
+          }
+        }
+      }
+    },
+    "kb_document_notice": {
+      "index": "kb_document_notice",
+      "ready": false,
+      "errors": [
+        {
+          "severity": "error",
+          "index": "kb_document_notice",
+          "field": "acl_tokens",
+          "code": "missing_required_field",
+          "message": "缺少必填字段 acl_tokens"
+        }
+      ],
+      "warnings": [
+        {
+          "severity": "warning",
+          "index": "kb_document_notice",
+          "field": "settings.number_of_shards",
+          "code": "single_primary_shard",
+          "actual": 1,
+          "message": "当前为单主分片，亿级数据前必须做容量评估并按业务索引拆分配置"
+        },
+        {
+          "severity": "warning",
+          "index": "kb_document_notice",
+          "field": "settings.number_of_replicas",
+          "code": "zero_replica",
+          "actual": 0,
+          "message": "副本数为 0，生产环境无高可用"
+        }
+      ],
+      "fields": {
+        "content": {
+          "exists": true,
+          "actual": {
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart",
+            "type": "text"
+          },
+          "expected": {
+            "required": true,
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          }
+        },
+        "display_content": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "text"
+          }
+        },
+        "vector": {
+          "exists": true,
+          "actual": {
+            "dims": 1024,
+            "index": true,
+            "similarity": "cosine",
+            "type": "dense_vector"
+          },
+          "expected": {
+            "required": true,
+            "type": "dense_vector",
+            "dims": 1024,
+            "similarity": "cosine",
+            "index": true
+          }
+        },
+        "sparse_vector": {
+          "exists": true,
+          "actual": {
+            "type": "rank_features"
+          },
+          "expected": {
+            "required": false,
+            "type": "rank_features"
+          }
+        },
+        "acl_tokens": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "source_index": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "index_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "owner_unit_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "visible_unit_codes": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "permission_version": {
+          "exists": true,
+          "actual": {
+            "type": "long"
+          },
+          "expected": {
+            "required": true,
+            "type": "long"
+          }
+        },
+        "metadata.is_latest": {
+          "exists": true,
+          "actual": {
+            "type": "boolean"
+          },
+          "expected": {
+            "required": true,
+            "type": "boolean"
+          }
+        },
+        "metadata.doc_version": {
+          "exists": true,
+          "actual": {
+            "type": "integer"
+          },
+          "expected": {
+            "required": true,
+            "type": "integer"
+          }
+        },
+        "metadata.acl_tokens": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.source_index": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.visible_unit_codes": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.permission_version": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "long"
+          }
+        }
+      }
+    },
+    "kb_document_official": {
+      "index": "kb_document_official",
+      "ready": false,
+      "errors": [
+        {
+          "severity": "error",
+          "index": "kb_document_official",
+          "field": "acl_tokens",
+          "code": "type_mismatch",
+          "expected": "keyword",
+          "actual": "text",
+          "message": "acl_tokens 类型应为 keyword，实际为 text"
+        }
+      ],
+      "warnings": [
+        {
+          "severity": "warning",
+          "index": "kb_document_official",
+          "field": "settings.number_of_shards",
+          "code": "single_primary_shard",
+          "actual": 1,
+          "message": "当前为单主分片，亿级数据前必须做容量评估并按业务索引拆分配置"
+        },
+        {
+          "severity": "warning",
+          "index": "kb_document_official",
+          "field": "settings.number_of_replicas",
+          "code": "zero_replica",
+          "actual": 0,
+          "message": "副本数为 0，生产环境无高可用"
+        }
+      ],
+      "fields": {
+        "content": {
+          "exists": true,
+          "actual": {
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart",
+            "type": "text"
+          },
+          "expected": {
+            "required": true,
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          }
+        },
+        "display_content": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": false,
+            "type": "text"
+          }
+        },
+        "vector": {
+          "exists": true,
+          "actual": {
+            "dims": 1024,
+            "index": true,
+            "similarity": "cosine",
+            "type": "dense_vector"
+          },
+          "expected": {
+            "required": true,
+            "type": "dense_vector",
+            "dims": 1024,
+            "similarity": "cosine",
+            "index": true
+          }
+        },
+        "sparse_vector": {
+          "exists": true,
+          "actual": {
+            "type": "rank_features"
+          },
+          "expected": {
+            "required": false,
+            "type": "rank_features"
+          }
+        },
+        "acl_tokens": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "source_index": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "index_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "owner_unit_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "visible_unit_codes": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "permission_version": {
+          "exists": true,
+          "actual": {
+            "type": "long"
+          },
+          "expected": {
+            "required": true,
+            "type": "long"
+          }
+        },
+        "metadata.is_latest": {
+          "exists": true,
+          "actual": {
+            "type": "boolean"
+          },
+          "expected": {
+            "required": true,
+            "type": "boolean"
+          }
+        },
+        "metadata.doc_version": {
+          "exists": true,
+          "actual": {
+            "type": "integer"
+          },
+          "expected": {
+            "required": true,
+            "type": "integer"
+          }
+        },
+        "metadata.acl_tokens": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.source_index": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.visible_unit_codes": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.permission_version": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "long"
+          }
+        }
+      }
+    },
+    "kb_document_public": {
+      "index": "kb_document_public",
+      "ready": false,
+      "errors": [
+        {
+          "severity": "error",
+          "index": "kb_document_public",
+          "field": "acl_tokens",
+          "code": "type_mismatch",
+          "expected": "keyword",
+          "actual": "text",
+          "message": "acl_tokens 类型应为 keyword，实际为 text"
+        }
+      ],
+      "warnings": [
+        {
+          "severity": "warning",
+          "index": "kb_document_public",
+          "field": "settings.number_of_shards",
+          "code": "single_primary_shard",
+          "actual": 1,
+          "message": "当前为单主分片，亿级数据前必须做容量评估并按业务索引拆分配置"
+        },
+        {
+          "severity": "warning",
+          "index": "kb_document_public",
+          "field": "settings.number_of_replicas",
+          "code": "zero_replica",
+          "actual": 0,
+          "message": "副本数为 0，生产环境无高可用"
+        }
+      ],
+      "fields": {
+        "content": {
+          "exists": true,
+          "actual": {
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart",
+            "type": "text"
+          },
+          "expected": {
+            "required": true,
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          }
+        },
+        "display_content": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": false,
+            "type": "text"
+          }
+        },
+        "vector": {
+          "exists": true,
+          "actual": {
+            "dims": 1024,
+            "index": true,
+            "similarity": "cosine",
+            "type": "dense_vector"
+          },
+          "expected": {
+            "required": true,
+            "type": "dense_vector",
+            "dims": 1024,
+            "similarity": "cosine",
+            "index": true
+          }
+        },
+        "sparse_vector": {
+          "exists": true,
+          "actual": {
+            "type": "rank_features"
+          },
+          "expected": {
+            "required": false,
+            "type": "rank_features"
+          }
+        },
+        "acl_tokens": {
+          "exists": true,
+          "actual": {
+            "fields": {
+              "keyword": {
+                "ignore_above": 256,
+                "type": "keyword"
+              }
+            },
+            "type": "text"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "source_index": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "index_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "owner_unit_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "visible_unit_codes": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "permission_version": {
+          "exists": true,
+          "actual": {
+            "type": "long"
+          },
+          "expected": {
+            "required": true,
+            "type": "long"
+          }
+        },
+        "metadata.is_latest": {
+          "exists": true,
+          "actual": {
+            "type": "boolean"
+          },
+          "expected": {
+            "required": true,
+            "type": "boolean"
+          }
+        },
+        "metadata.doc_version": {
+          "exists": true,
+          "actual": {
+            "type": "integer"
+          },
+          "expected": {
+            "required": true,
+            "type": "integer"
+          }
+        },
+        "metadata.acl_tokens": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.source_index": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.visible_unit_codes": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.permission_version": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "long"
+          }
+        }
+      }
+    },
+    "kb_document_v1": {
+      "index": "kb_document_v1",
+      "ready": false,
+      "errors": [
+        {
+          "severity": "error",
+          "index": "kb_document_v1",
+          "field": "acl_tokens",
+          "code": "missing_required_field",
+          "message": "缺少必填字段 acl_tokens"
+        }
+      ],
+      "warnings": [
+        {
+          "severity": "warning",
+          "index": "kb_document_v1",
+          "field": "settings.number_of_shards",
+          "code": "single_primary_shard",
+          "actual": 1,
+          "message": "当前为单主分片，亿级数据前必须做容量评估并按业务索引拆分配置"
+        },
+        {
+          "severity": "warning",
+          "index": "kb_document_v1",
+          "field": "settings.number_of_replicas",
+          "code": "zero_replica",
+          "actual": 0,
+          "message": "副本数为 0，生产环境无高可用"
+        }
+      ],
+      "fields": {
+        "content": {
+          "exists": true,
+          "actual": {
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart",
+            "type": "text"
+          },
+          "expected": {
+            "required": true,
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          }
+        },
+        "display_content": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "text"
+          }
+        },
+        "vector": {
+          "exists": true,
+          "actual": {
+            "dims": 1024,
+            "index": true,
+            "similarity": "cosine",
+            "type": "dense_vector"
+          },
+          "expected": {
+            "required": true,
+            "type": "dense_vector",
+            "dims": 1024,
+            "similarity": "cosine",
+            "index": true
+          }
+        },
+        "sparse_vector": {
+          "exists": true,
+          "actual": {
+            "type": "rank_features"
+          },
+          "expected": {
+            "required": false,
+            "type": "rank_features"
+          }
+        },
+        "acl_tokens": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "source_index": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "index_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "owner_unit_code": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "visible_unit_codes": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": true,
+            "type": "keyword"
+          }
+        },
+        "permission_version": {
+          "exists": true,
+          "actual": {
+            "type": "long"
+          },
+          "expected": {
+            "required": true,
+            "type": "long"
+          }
+        },
+        "metadata.is_latest": {
+          "exists": true,
+          "actual": {
+            "type": "boolean"
+          },
+          "expected": {
+            "required": true,
+            "type": "boolean"
+          }
+        },
+        "metadata.doc_version": {
+          "exists": true,
+          "actual": {
+            "type": "integer"
+          },
+          "expected": {
+            "required": true,
+            "type": "integer"
+          }
+        },
+        "metadata.acl_tokens": {
+          "exists": true,
+          "actual": {
+            "type": "keyword"
+          },
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.source_index": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.visible_unit_codes": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "keyword"
+          }
+        },
+        "metadata.permission_version": {
+          "exists": false,
+          "actual": null,
+          "expected": {
+            "required": false,
+            "type": "long"
+          }
+        }
+      }
+    }
+  },
+  "summary": {
+    "total": 6,
+    "ready": 0,
+    "notReady": 6,
+    "errorCount": 10,
+    "warningCount": 12
+  }
+}

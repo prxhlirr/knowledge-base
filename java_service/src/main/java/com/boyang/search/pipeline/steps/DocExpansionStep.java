@@ -7,6 +7,7 @@ import com.boyang.search.entity.SysTenantPolicy;
 import com.boyang.search.pipeline.SearchContext;
 import com.boyang.search.pipeline.SearchPipelineStep;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -30,6 +31,13 @@ public class DocExpansionStep implements SearchPipelineStep {
 
     @Autowired
     private ElasticsearchClient esClient;
+
+    /**
+     * 业务功能：控制 Sibling/Parent 两路文档扩展查询的整体等待时间。
+     * 设计原因：文档扩展是召回后的增强步骤，必须允许生产环境按延迟预算调节，避免固定 3s 拖慢主链路。
+     */
+    @Value("${search.doc-expansion.timeout-ms:${SEARCH_DOC_EXPANSION_TIMEOUT_MS:3000}}")
+    private String docExpansionTimeoutMs = "3000";
 
     @Override
     @SuppressWarnings("unchecked")
@@ -154,9 +162,9 @@ public class DocExpansionStep implements SearchPipelineStep {
 
         // 等待两路并发完成?s 上限兜底，超时时降级到已有候选池
         try {
-            CompletableFuture.allOf(siblingFuture, parentFuture).get(3, TimeUnit.SECONDS);
+            CompletableFuture.allOf(siblingFuture, parentFuture).get(resolveDocExpansionTimeoutMs(), TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
-            System.err.println("[DocExpansion] Sibling/Parent query timeout (3s), using existing candidates.");
+            System.err.println("[DocExpansion] Sibling/Parent query timeout, using existing candidates.");
             siblingFuture.cancel(true);
             parentFuture.cancel(true);
         }
@@ -309,6 +317,22 @@ public class DocExpansionStep implements SearchPipelineStep {
 
         System.out.println("====== [Pipeline] Node 5: DocExpansion ======");
         System.out.println("  - Final Pool Size: " + candidates.size());
+    }
+
+    int resolveDocExpansionTimeoutMs() {
+        return resolvePositiveTimeoutMs(docExpansionTimeoutMs, 3000);
+    }
+
+    int resolvePositiveTimeoutMs(String configured, int defaultValue) {
+        if (configured == null) {
+            return defaultValue;
+        }
+        try {
+            int parsed = Integer.parseInt(configured.trim());
+            return parsed > 0 ? parsed : defaultValue;
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
     }
 
     /**

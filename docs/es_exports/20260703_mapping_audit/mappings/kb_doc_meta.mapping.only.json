@@ -1,0 +1,128 @@
+{
+  "properties": {
+    "acl_tokens": {
+      "type": "keyword"
+    },
+    "chunk_count": {
+      "type": "integer"
+    },
+    "content": {
+      "analyzer": "ik_max_word",
+      "fields": {
+        "keyword": {
+          "ignore_above": 256,
+          "type": "keyword"
+        }
+      },
+      "type": "text"
+    },
+    "content_hash": {
+      "type": "keyword"
+    },
+    "data_source": {
+      "type": "keyword"
+    },
+    "doc_title": {
+      "analyzer": "ik_max_word",
+      "fields": {
+        "keyword": {
+          "type": "keyword"
+        }
+      },
+      "type": "text"
+    },
+    "doc_vector": {
+      "type": "float"
+    },
+    "doc_version": {
+      "type": "integer"
+    },
+    "index_code": {
+      "fields": {
+        "keyword": {
+          "ignore_above": 256,
+          "type": "keyword"
+        }
+      },
+      "type": "text"
+    },
+    "is_latest": {
+      "type": "boolean"
+    },
+    "owner_dept_id": {
+      "type": "keyword"
+    },
+    "owner_unit_code": {
+      "fields": {
+        "keyword": {
+          "ignore_above": 256,
+          "type": "keyword"
+        }
+      },
+      "type": "text"
+    },
+    "permission_version": {
+      "type": "long"
+    },
+    "security_level": {
+      "type": "integer"
+    },
+    "source": {
+      "fields": {
+        "keyword": {
+          "ignore_above": 256,
+          "type": "keyword"
+        }
+      },
+      "type": "text"
+    },
+    "source_index": {
+      "fields": {
+        "keyword": {
+          "ignore_above": 256,
+          "type": "keyword"
+        }
+      },
+      "type": "text"
+    },
+    "source_name": {
+      "type": "keyword"
+    },
+    "updated_at": {
+      "type": "long"
+    },
+    "updated_by": {
+      "type": "keyword"
+    },
+    "vector": {
+      "dims": 1024,
+      "index": true,
+      "index_options": {
+        "ef_construction": 100,
+        "m": 16,
+        "type": "hnsw"
+      },
+      "similarity": "cosine",
+      "type": "dense_vector"
+    },
+    "version_at": {
+      "format": "epoch_millis",
+      "type": "date"
+    },
+    "visibility": {
+      "type": "keyword"
+    },
+    "visible_depts": {
+      "type": "keyword"
+    },
+    "visible_unit_codes": {
+      "fields": {
+        "keyword": {
+          "ignore_above": 256,
+          "type": "keyword"
+        }
+      },
+      "type": "text"
+    }
+  }
+}

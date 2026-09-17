@@ -166,10 +166,9 @@ public class PermissionGuard {
                 if (docDept == null || userDept == null || docDept.isEmpty()) {
                     return AccessResult.deny("部门信息不完整，无法校验 DEPT 权限");
                 }
-                // [部门树推导] 使用 DeptTreeService 判断用户部门是否属于文档部门的下级或同级
-                // 对接外部机构系统同步后，此处可正确处理非行政区划编码的 2 级部门结构
-                // 未同步时自动降级为前缀匹配（DeptTreeService 内部兜底逻辑）
-                if (deptTreeService.isSubDept(docDept, userDept)) {
+                // 新权限语义：文档挂在 A 部门，则 A 及 A 的上级部门可见。
+                // 这里必须与 ES visible_unit_codes 的写入方向一致，否则后置校验会误拒 ES 已正确召回的上级用户。
+                if (deptTreeService.isAncestorOrSelf(userDept, docDept)) {
                     return AccessResult.allow();
                 }
                 return AccessResult.deny("您所在部门无权访问此文档（DEPT）");
@@ -309,7 +308,7 @@ public class PermissionGuard {
                     String userDept = normalizeDeptCode(userDeptCode);
                     if (docDept == null || userDept == null || docDept.isEmpty()) {
                         results.put(sourceName, AccessResult.deny("部门信息不完整，无法校验 DEPT 权限"));
-                    } else if (deptTreeService.isSubDept(docDept, userDept)) {
+                    } else if (deptTreeService.isAncestorOrSelf(userDept, docDept)) {
                         results.put(sourceName, AccessResult.allow());
                     } else {
                         results.put(sourceName, AccessResult.deny("您所在部门无权访问此文档（DEPT）"));

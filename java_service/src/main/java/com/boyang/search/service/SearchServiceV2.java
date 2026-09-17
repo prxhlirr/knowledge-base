@@ -125,6 +125,13 @@ public class SearchServiceV2 {
     private boolean keywordLiteralSkip;
 
     /**
+     * 业务功能：控制 V2 并行轨道中 VectorFetchStep 的整体等待预算。
+     * 设计原因：该等待包住向量化、HyDE 和 dual vector 预取，生产环境需要按 AI 服务吞吐和总 SLA 调整。
+     */
+    @Value("${search.v2.vector-fetch-timeout-ms:${SEARCH_V2_VECTOR_FETCH_TIMEOUT_MS:6000}}")
+    private String vectorFetchTimeoutMs = "6000";
+
+    /**
      * V2 统一搜索主入口（支持三种检索模式）
      *
      * 流程：
@@ -229,7 +236,7 @@ public class SearchServiceV2 {
         final boolean needVector = !"keyword".equals(context.getSearchMode());
 
         // [性能优化] 判断是否需要 DocSearchPrefilter（与 VectorFetch 并行执行的条件）
-        final boolean usePrefilter = needVector && context.isHomeLightweightMode();
+        final boolean usePrefilter = needVector && hybridRecallStrategy.shouldUseDocSearchPrefilter(context);
 
         log.info("[SearchServiceV2] mode={} needVector={} returnTopK={} recallTopK={} fusionTopK={} rerankTopK={} index={}",
                 context.getSearchMode(), needVector, context.getReturnTopK(), context.getRecallTopK(),
@@ -273,7 +280,7 @@ public class SearchServiceV2 {
 
             // 等待 VectorFetch 完成
             try {
-                vectorFuture.get(6_000, TimeUnit.MILLISECONDS);
+                vectorFuture.get(resolveVectorFetchTimeoutMs(), TimeUnit.MILLISECONDS);
                 context.getTimings().put("vector_fetch_ms", System.currentTimeMillis() - parallelStart);
             } catch (Exception e) {
                 System.err.println("[V2-Parallel] VectorFetch timed out, continuing with degraded recall");
@@ -399,6 +406,7 @@ public class SearchServiceV2 {
         }
         final List<Double> denseVector = context.getQueryVector();
         final String queryText = context.getQueryText();
+        final String readableSourceIndexPattern = context.getResolvedIndexPattern();
         final JwtVerifier.UserIdentity identity = UserContextHolder.getIdentity();
         CompletableFuture<List<Map<String, Object>>> future = CompletableFuture.supplyAsync(() -> {
             UserContextHolder.setIdentity(identity);
@@ -406,10 +414,10 @@ public class SearchServiceV2 {
             try {
                 List<Map<String, Object>> hits;
                 if (denseVector != null && !denseVector.isEmpty()) {
-                    hits = aiEngineGateway.fetchQaResults(denseVector, queryText, null,
+                    hits = aiEngineGateway.fetchQaResults(denseVector, queryText, null, readableSourceIndexPattern,
                             Math.max(1, Math.min(10, context.getReturnTopK())));
                 } else {
-                    hits = aiEngineGateway.fetchQaResultsByBm25(queryText, null,
+                    hits = aiEngineGateway.fetchQaResultsByBm25(queryText, null, readableSourceIndexPattern,
                             Math.max(1, Math.min(10, context.getReturnTopK())));
                 }
                 context.setAnswerQaRecallMs(System.currentTimeMillis() - startMs);
@@ -467,6 +475,22 @@ public class SearchServiceV2 {
         return step.getClass().getSimpleName().replace("Step", "").toLowerCase() + "_ms";
     }
 
+    int resolveVectorFetchTimeoutMs() {
+        return resolvePositiveTimeoutMs(vectorFetchTimeoutMs, 6000);
+    }
+
+    int resolvePositiveTimeoutMs(String configured, int defaultValue) {
+        if (configured == null) {
+            return defaultValue;
+        }
+        try {
+            int parsed = Integer.parseInt(configured.trim());
+            return parsed > 0 ? parsed : defaultValue;
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
+    }
+
     /**
      * [性能优化] 执行单个管线步骤并记录耗时（替代原 for 循环中的内联逻辑）。
      */
@@ -522,12 +546,9 @@ public class SearchServiceV2 {
      *   2. 超级管理员（isSuperAdmin=true）→ 直接返回全量结果，仅打印日志
      *   3. 普通用户 → 逐条查 PermissionGuard（MySQL 强一致）过滤无权文档
      *
-     * [P0-2 修复] 校验维度从 organization（机构名）改为 doc_id（文档唯一标识）。
-     * 根因：organization = metadata.source（发布机构名称），同一机构可能发布多个权限不同的文档；
-     *       用机构名做 PermissionGuard 的 sourceName 参数，实际粒度是「机构级」而非「文档级」，
-     *       导致同一机构的高权限文档可能使低权限文档被误放行。
-     * 修复：取 doc_id（写入 RerankStep 的 extracted_doc_id，是 kb_doc_registry.source_name
-     *       的原始值），作为 PermissionGuard.canAccess() 的查询键。
+     * [P0 修复] 校验维度从 organization（机构名）改为 permission_guard_key/source_name/file_name。
+     * 当前 PermissionGuard 的权威查询键是 kb_doc_registry.source_name，不能用机构名做权限键。
+     * 后续若 registry 引入稳定 doc_id，可在 resolvePermissionGuardKey() 中切换主键。
      *
      * @param rawResult Pipeline 输出的原始结果集
      * @return 经权限过滤后的安全结果集
@@ -555,11 +576,10 @@ public class SearchServiceV2 {
         int nullKeyCount = 0;
 
         for (Map<String, Object> doc : rawResult) {
-            String organization = (String) doc.getOrDefault("file_name", doc.getOrDefault("organization", ""));
-            String guardKey = (organization != null && !organization.isEmpty()) ? organization : null;
+            String guardKey = resolvePermissionGuardKey(doc);
             if (guardKey == null) {
                 nullKeyCount++;
-                log.warn("[PostPermFilter] organization/file_name 为空，无法校验权限，拒绝返回 doc_id='{}'",
+                log.warn("[PostPermFilter] permission guard key 为空，无法校验权限，拒绝返回 doc_id='{}'",
                         doc.get("doc_id"));
             } else {
                 guardKeys.add(guardKey);
@@ -623,8 +643,7 @@ public class SearchServiceV2 {
         int deniedCount = 0;
 
         for (Map<String, Object> doc : rawResult) {
-            String organization = (String) doc.getOrDefault("file_name", doc.getOrDefault("organization", ""));
-            String guardKey = (organization != null && !organization.isEmpty()) ? organization : null;
+            String guardKey = resolvePermissionGuardKey(doc);
 
             if (guardKey == null) {
                 deniedCount++;
@@ -646,6 +665,34 @@ public class SearchServiceV2 {
         }
 
         return safeResult;
+    }
+
+    private String resolvePermissionGuardKey(Map<String, Object> doc) {
+        if (doc == null) {
+            return null;
+        }
+        String key = firstNonBlank(
+                doc.get("permission_guard_key"),
+                doc.get("source_name"),
+                doc.get("source"),
+                doc.get("file_name"));
+        return key.isEmpty() ? null : key;
+    }
+
+    private String firstNonBlank(Object... values) {
+        if (values == null) {
+            return "";
+        }
+        for (Object value : values) {
+            if (value == null) {
+                continue;
+            }
+            String text = String.valueOf(value).trim();
+            if (!text.isEmpty()) {
+                return text;
+            }
+        }
+        return "";
     }
 
     private List<Map<String, Object>> applySensitivePolicyFilter(SearchContext context, List<Map<String, Object>> rawResult) {

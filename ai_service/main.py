@@ -1282,11 +1282,100 @@ class QaSearchRequest(BaseModel):
     vector: List[float]          # dense query 向量（1024 维，由 Java 侧预取）
     query_text: str              # 原始查询词（用于 bigram 重叠校验）
     force_source: Optional[str] = None  # 租户数据源过滤（对应 metadata.source）
+    readable_source_indexes: Optional[str] = None  # Java 侧解析后的可读 kb_document_* 物理索引范围
     top_k: int = 3               # 最多返回几条 QA
     # [权限对齐] Java 侧 UserContextHolder.getAclTokens() 预计算的 token 集合
     # 与主索引 buildLegacyPermFilter 对称：检索前注入，直接用于 ES terms filter
     # 兜底：空列表时降级为「无新架构 token」→ must_not exists 旧架构路径（历史数据可见）
     acl_tokens: Optional[List[str]] = None
+
+
+def _readable_qa_source_index_filter(readable_source_indexes: Optional[str]) -> Optional[dict]:
+    """
+    构建 QA 聚合索引的 source_index 过滤。
+
+    业务功能：
+      QA 索引不随 kb_document_* 物理索引拆分，需要通过 source_index 字段对齐角色索引权限。
+      旧 QA 数据可能没有 source_index；当 Java 已传入可读物理索引范围时，缺失权限字段必须拒绝命中，
+      避免历史未回填数据绕过角色索引权限。
+
+    关键流程：
+      1. 只接受明确的 kb_document_* 物理索引；
+      2. 遇到 kb_document 读别名或通配符时不猜测展开，返回 None；
+      3. 同时兼容 keyword 映射和历史 text+keyword 动态映射；
+      4. 新数据必须命中 terms；旧数据需先完成离线回填后再参与受限角色检索。
+    """
+    if not readable_source_indexes:
+        return None
+    raw_parts = [part.strip() for part in str(readable_source_indexes).split(",") if part and part.strip()]
+    values = []
+    for part in raw_parts:
+        if part == "kb_document" or "*" in part:
+            return None
+        if part.startswith("kb_document_"):
+            values.append(part)
+    if not values:
+        return None
+    return {
+        "bool": {
+            "should": [
+                {"terms": {"source_index": values}},
+                {"terms": {"source_index.keyword": values}}
+            ],
+            "minimum_should_match": 1
+        }
+    }
+
+
+def _qa_acl_filter(tokens: Optional[List[str]]) -> dict:
+    """
+    业务功能：构建 QA 索引统一 ACL 过滤条件。
+    关键流程：
+      1. 超管 token 直接旁路，保持与 Java PermissionGuard 行为一致；
+      2. 普通用户同时匹配 acl_tokens 与 acl_tokens.keyword，兼容历史动态 mapping；
+      3. 无 token 时只允许没有 ACL 字段的旧数据，避免调用方漏传 token 后放大全量权限。
+
+    设计原因：当前生产存量 kb_qa_pairs 的 acl_tokens 是 text+keyword 动态映射，
+    单查 acl_tokens 会导致 terms 精确过滤命中 0，因此必须兼容 keyword 子字段。
+    """
+    safe_tokens = tokens or []
+    if "_SUPER_ADMIN" in safe_tokens:
+        return {"match_all": {}}
+    if safe_tokens:
+        return {
+            "bool": {
+                "should": [
+                    {"terms": {"acl_tokens": safe_tokens}},
+                    {"terms": {"acl_tokens.keyword": safe_tokens}},
+                    {"bool": {"must_not": {"exists": {"field": "acl_tokens"}}}}
+                ],
+                "minimum_should_match": 1
+            }
+        }
+    return {"bool": {"must_not": {"exists": {"field": "acl_tokens"}}}}
+
+
+def _qa_knn_num_candidates(top_k: int) -> int:
+    """
+    业务功能：计算 QA KNN 检索使用的 num_candidates。
+    关键流程：优先读取环境变量；非法配置回退默认值，并确保候选数不小于 top_k 与 top_k*2。
+    """
+    default_value = 100
+    raw = os.getenv("QA_KNN_NUM_CANDIDATES")
+    if raw is None or str(raw).strip() == "":
+        configured = default_value
+    else:
+        try:
+            configured = int(str(raw).strip())
+        except ValueError:
+            print(f"[QA Search] invalid QA_KNN_NUM_CANDIDATES={raw!r}, fallback to {default_value}")
+            configured = default_value
+    if configured < 1:
+        print(f"[QA Search] QA_KNN_NUM_CANDIDATES={configured} is lower than 1, fallback to {default_value}")
+        configured = default_value
+    safe_top_k = max(int(top_k or 1), 1)
+    return max(configured, safe_top_k * 2, safe_top_k)
+
 
 @app.post("/api/ai/qa/search")
 def qa_search(req: QaSearchRequest):
@@ -1294,7 +1383,7 @@ def qa_search(req: QaSearchRequest):
     业务功能：在 Elasticsearch QA 索引（kb_qa_*）中按向量相似度召回高置信度问答对。
     关键流程：
       1. 接收 Java 侧预取的 dense query 向量（1024 维 BGE-M3）
-      2. 对 QA 索引执行 KNN 检索（knn.field=dense_vector，num_candidates=50）
+      2. 对 QA 索引执行 KNN 检索（knn.field=question_vector，num_candidates 支持环境变量配置）
       3. 返回 top_k 条 QA 候选（含 _rrf_score 用于 Domain Filter 判断）
     设计原则：
       - 不在 Python 端做 Domain Filter（由 Java QaInjectionStep 执行，保持职责单一）
@@ -1330,39 +1419,18 @@ def qa_search(req: QaSearchRequest):
                 "field": "question_vector",   # 与 kb_qa_pairs mapping 对齐
                 "query_vector": req.vector,
                 "k": req.top_k,
-                "num_candidates": 50
+                "num_candidates": _qa_knn_num_candidates(req.top_k)
             },
             "size": req.top_k,
-            "_source": ["question", "answer_content", "answer_chunk_id", "doc_hash", "doc_version", "is_latest", "section_path", "source"]
+            "_source": [
+                "question", "answer_content", "answer_chunk_id", "doc_hash", "doc_version",
+                "is_latest", "section_path", "source",
+                "source_index", "index_code", "owner_unit_code", "visible_unit_codes"
+            ]
         }
 
-        # ── 构建统一 ACL 权限过滤子句（与主索引 buildLegacyPermFilter 完全对称）──────
-        # 超管旁路：token 列表含 _SUPER_ADMIN 时返回 match_all，放行全量文档（与 Java 侧行为一致）；
-        # 分支A（新架构）：acl_tokens 字段与用户 token 集合 terms 求交，命中任一即有权；
-        # 分支B（旧架构兜底）：文档不存在 acl_tokens 字段（历史数据）→ must_not exists 放行；
-        # 两个分支 should + minimum_should_match=1，确保新旧文档均可被检索。
-        def _build_acl_filter(tokens: list) -> dict:
-            # 超管旁路：包含 _SUPER_ADMIN 时直接 match_all，跳过所有文档级权限校验
-            if "_SUPER_ADMIN" in tokens:
-                return {"match_all": {}}
-            if tokens:
-                return {
-                    "bool": {
-                        "should": [
-                            # 分支A：新架构，token 交集校验
-                            {"terms": {"acl_tokens": tokens}},
-                            # 分支B：旧架构存量文档（无 acl_tokens 字段），直接放行
-                            {"bool": {"must_not": {"exists": {"field": "acl_tokens"}}}}
-                        ],
-                        "minimum_should_match": 1
-                    }
-                }
-            else:
-                # acl_tokens 为空（未传权限信息）：保守策略，只放行无 acl_tokens 的历史文档
-                # 避免因 Java 传参缺失而意外暴露全量数据
-                return {"bool": {"must_not": {"exists": {"field": "acl_tokens"}}}}
-
-        _acl_filter = _build_acl_filter(req.acl_tokens or [])
+        _acl_filter = _qa_acl_filter(req.acl_tokens)
+        _source_index_filter = _readable_qa_source_index_filter(req.readable_source_indexes)
 
         _base_filter = [
             # is_latest 版本过滤
@@ -1378,6 +1446,8 @@ def qa_search(req: QaSearchRequest):
             # [权限对齐] 用户 ACL Token 过滤（新架构 terms 匹配 + 旧架构 exists 兜底）
             _acl_filter
         ]
+        if _source_index_filter:
+            _base_filter.append(_source_index_filter)
         if req.force_source:
             knn_query["knn"]["filter"] = {
                 "bool": {
@@ -1423,7 +1493,12 @@ def qa_search(req: QaSearchRequest):
                 # 根因：QA _id 中的 hash 与文档 chunk _id 的 hash 在文档重新入库后可能不一致，
                 #       显式透传 doc_hash（Python 写入时存储的 file_base_hash）作为折叠基准。
                 "doc_hash":     source.get("doc_hash", ""),
-                "section_path": source.get("section_path", "")
+                "section_path": source.get("section_path", ""),
+                # 透传权限投影字段，便于 Java 侧审计 QA 是否来自用户可读索引。
+                "source_index":  source.get("source_index", ""),
+                "index_code":    source.get("index_code", ""),
+                "owner_unit_code": source.get("owner_unit_code", ""),
+                "visible_unit_codes": source.get("visible_unit_codes", [])
             }
 
             results.append({
@@ -1455,6 +1530,7 @@ def qa_search(req: QaSearchRequest):
 class Bm25QaSearchRequest(BaseModel):
     query_text: str              # 原始查询词
     force_source: Optional[str] = None  # 租户数据源过滤
+    readable_source_indexes: Optional[str] = None  # Java 侧解析后的可读 kb_document_* 物理索引范围
     top_k: int = 5               # BM25 匹配候选数稍多（弥补精度不如 knn）
     # [权限对齐] 与 QaSearchRequest.acl_tokens 语义一致，由 Java 侧统一注入
     acl_tokens: Optional[List[str]] = None
@@ -1480,31 +1556,14 @@ def qa_search_bm25(req: Bm25QaSearchRequest):
     try:
         import requests as _req
         es_host = os.getenv("ES_HOST", "http://127.0.0.1:9200")
-        qa_index = os.getenv("QA_INDEX_PATTERN", "kb_qa_*")
+        # 与 KNN QA 检索保持一致：BM25 也必须走读别名，避免旧物理索引保留期间被通配符扫入。
+        from core.indexing.es_setup import QA_INDEX_READ_ALIAS
+        qa_index = QA_INDEX_READ_ALIAS
         _es_user = os.getenv("ES_USER", "")
         _es_pass = os.getenv("ES_PASS", "")
         _es_auth = (_es_user, _es_pass) if _es_user else None
 
-        # ── 构建 ACL 权限过滤子句（复用 KNN 通道相同逻辑，确保两路一致）────────────
-        # 超管旁路：_SUPER_ADMIN → match_all（与 KNN 通道、Java buildLegacyPermFilter 三方一致）
-        # 就地定义 lambda 避免模块级依赖；与 KNN 通道的 _build_acl_filter 逻辑完全一致
-        _acl_tokens = req.acl_tokens or []
-        if "_SUPER_ADMIN" in _acl_tokens:
-            # 超管旁路：match_all 放行全量，无需 terms 过滤
-            _acl_clause = {"match_all": {}}
-        elif _acl_tokens:
-            _acl_clause = {
-                "bool": {
-                    "should": [
-                        {"terms": {"acl_tokens": _acl_tokens}},
-                        {"bool": {"must_not": {"exists": {"field": "acl_tokens"}}}}
-                    ],
-                    "minimum_should_match": 1
-                }
-            }
-        else:
-            # acl_tokens 未传：保守策略，只放行无权限字段的历史文档
-            _acl_clause = {"bool": {"must_not": {"exists": {"field": "acl_tokens"}}}}
+        _acl_clause = _qa_acl_filter(req.acl_tokens)
 
         # is_latest 过滤（与 KNN 通道一致）+ ACL 权限过滤 + 租户过滤
         _bm25_filters = [
@@ -1519,6 +1578,9 @@ def qa_search_bm25(req: Bm25QaSearchRequest):
             },
             _acl_clause  # [权限对齐] 用户级 ACL Token 过滤
         ]
+        _source_index_filter = _readable_qa_source_index_filter(req.readable_source_indexes)
+        if _source_index_filter:
+            _bm25_filters.append(_source_index_filter)
         if req.force_source:
             _bm25_filters.append({"term": {"source": req.force_source}})
 
@@ -1541,7 +1603,11 @@ def qa_search_bm25(req: Bm25QaSearchRequest):
                 }
             },
             "size": req.top_k,
-            "_source": ["question", "answer_content", "answer_chunk_id", "doc_hash", "doc_version", "is_latest", "section_path", "source"]
+            "_source": [
+                "question", "answer_content", "answer_chunk_id", "doc_hash", "doc_version",
+                "is_latest", "section_path", "source",
+                "source_index", "index_code", "owner_unit_code", "visible_unit_codes"
+            ]
         }
 
         resp = _req.post(
@@ -1573,7 +1639,12 @@ def qa_search_bm25(req: Bm25QaSearchRequest):
                 "owner":        file_name,
                 "chunk_id":     source.get("answer_chunk_id", ""),
                 "doc_hash":     source.get("doc_hash", ""),
-                "section_path": source.get("section_path", "")
+                "section_path": source.get("section_path", ""),
+                # 透传权限投影字段，便于调用方验证 QA 候选没有跨索引越权。
+                "source_index":  source.get("source_index", ""),
+                "index_code":    source.get("index_code", ""),
+                "owner_unit_code": source.get("owner_unit_code", ""),
+                "visible_unit_codes": source.get("visible_unit_codes", [])
             }
 
             results.append({

@@ -1,12 +1,20 @@
 import os
 import time
+import json
+import math
 from core.chunking.semantic_chunker import SemanticChunker
 from elasticsearch import Elasticsearch, helpers
-from markitdown import MarkItDown
+try:
+    from markitdown import MarkItDown
+except ImportError:
+    MarkItDown = None
 import concurrent.futures
 from tqdm import tqdm
 import hashlib
-import jieba.analyse
+try:
+    import jieba.analyse as jieba_analyse
+except ImportError:
+    jieba_analyse = None
 import re
 import threading
 from core.model_manager import model_manager
@@ -14,12 +22,173 @@ from core.cleaning.text_cleaner import TextCleaner               # [架构重构
 from core.cleaning.noise_classifier import NoiseClassifier
 from core.indexing.es_setup import (
     ESSetup, INDEX_NAME, QA_INDEX_NAME, DOC_META_INDEX, DOC_META_WRITE_ALIAS,
-    doc_meta_index_mapping,
+    doc_meta_index_mapping, document_index_settings, qa_index_mapping,
     QA_INDEX_WRITE_ALIAS, QA_INDEX_READ_ALIAS,   # [轨道A] QA 别名化改造
 )  # [架构重构阶段一] ES初始化 + 常量
 from core.indexing.dedup_checker import ContentDedupChecker       # [架构重构阶段四] 内容指纹去重
 from core.indexing.doc_indexer import DocIndexer                  # [架构重构阶段四] bulk写入+版本管理+元数据更新
 from core.parsing.parser_factory import ParserFactory             # [架构重构阶段二] 文档格式解析工厂
+from core.normalization.text_normalizer import normalize_filename, normalize_metadata_text
+from core.permissions.acl_payload import resolve_acl_tokens_from_metadata
+
+
+VECTOR_DIMS = 1024
+VECTOR_NORM_MIN = 1e-8
+
+
+def validate_dense_vectors_for_indexing(vectors: list, expected_count: int, source_name: str) -> None:
+    """
+    业务功能：在 chunk 写入 ES 前校验稠密向量结果，阻止错误向量污染生产索引。
+    关键流程：先校验模型返回数量，再逐条校验维度、数值合法性和范数，任一异常都让本次入库失败并交给任务重试链路处理。
+    设计原因：向量字段是语义检索的事实来源，缺失或零范数向量不能用兜底值伪装成成功数据。
+    """
+    if len(vectors) != expected_count:
+        raise ValueError(
+            f"dense_vector_count_mismatch: source={source_name}, "
+            f"expected={expected_count}, actual={len(vectors)}"
+        )
+
+    for idx, vector in enumerate(vectors):
+        if not isinstance(vector, (list, tuple)):
+            raise ValueError(f"dense_vector_invalid_type: source={source_name}, idx={idx}")
+        if len(vector) != VECTOR_DIMS:
+            raise ValueError(
+                f"dense_vector_dim_mismatch: source={source_name}, idx={idx}, "
+                f"expected={VECTOR_DIMS}, actual={len(vector)}"
+            )
+
+        norm_sq = 0.0
+        for value in vector:
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise ValueError(f"dense_vector_invalid_value: source={source_name}, idx={idx}")
+            norm_sq += float(value) * float(value)
+        if norm_sq <= VECTOR_NORM_MIN * VECTOR_NORM_MIN:
+            raise ValueError(f"dense_vector_zero_norm: source={source_name}, idx={idx}")
+
+
+def resolve_embedding_truncation_policy(raw_policy: str = None) -> str:
+    """
+    业务功能：解析向量化截断风险处理策略。
+    关键流程：支持 warn/fail 两种生产语义，非法配置回退 warn，避免配置错误导致意外阻断入库。
+    设计原因：默认生产链路应先观测不阻断，离线压测和严格环境可显式 fail 暴露 chunk/token 配置问题。
+    """
+    policy = (raw_policy or os.getenv("EMBEDDING_TRUNCATION_POLICY", "warn")).strip().lower()
+    return policy if policy in {"warn", "fail"} else "warn"
+
+
+def build_embedding_truncation_error(token_stats: dict, source_name: str) -> str:
+    """
+    业务功能：生成稳定的 embedding 截断风险错误信息。
+    关键流程：从 token_stats 中提取超窗数量、总数、max_len 和 max_tokens，用于返回给任务重试/离线报告。
+    设计原因：失败信息必须足够具体，运维才能据此判断是调大窗口还是调整 chunk 策略。
+    """
+    token_stats = token_stats or {}
+    return (
+        f"embedding_truncation_risk: source={source_name}, "
+        f"truncated={token_stats.get('truncated_count', 0)}/{token_stats.get('text_count', 0)}, "
+        f"max_len={token_stats.get('max_len', 0)}, max_tokens={token_stats.get('max_tokens', 0)}"
+    )
+
+
+def resolve_embedding_context_mode(raw_mode: str = None) -> str:
+    """
+    业务功能：解析 chunk 向量化输入的上下文拼接模式。
+    关键流程：支持 raw/section/title_section 三种模式，非法配置回退 raw。
+    设计原因：短 fine chunk 需要可选章节语义补强，但默认必须保持历史 raw_content 行为便于灰度对比。
+    """
+    mode = (raw_mode or os.getenv("EMBEDDING_CONTEXT_MODE", "raw")).strip().lower()
+    return mode if mode in {"raw", "section", "title_section"} else "raw"
+
+
+def _clean_embedding_context_part(value: str) -> str:
+    """
+    业务功能：清洗 embedding 上下文前缀片段。
+    关键流程：去除 HTML 页码锚点、竖线和多余空白，避免元信息噪声污染向量输入。
+    设计原因：上下文前缀只应提供标题/章节语义，不应把展示符号和解析锚点带入向量空间。
+    """
+    text = str(value or "")
+    text = re.sub(r'<!--\s*PAGE_START:\s*\d+\s*-->', '', text)
+    text = text.replace("|", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def build_embedding_input_text(chunk, doc_title: str = "", context_mode: str = None) -> str:
+    """
+    业务功能：构造单个 chunk 的 embedding 输入文本。
+    关键流程：默认返回 raw_content；section 模式补 section_path；title_section 模式补文档标题和章节路径。
+    设计原因：展示内容和向量化输入应解耦，短句 chunk 可通过轻量上下文获得更稳定的语义表示。
+    """
+    mode = resolve_embedding_context_mode(context_mode)
+    raw_text = _clean_embedding_context_part(getattr(chunk, "raw_content", "") or getattr(chunk, "content", ""))
+    if mode == "raw":
+        return raw_text
+
+    prefix_parts = []
+    if mode == "title_section":
+        title = _clean_embedding_context_part(doc_title)
+        if title:
+            prefix_parts.append(f"文档标题：{title}")
+
+    section = _clean_embedding_context_part(getattr(chunk, "section_path", ""))
+    if section:
+        prefix_parts.append(f"章节路径：{section}")
+
+    if not prefix_parts:
+        return raw_text
+    return "\n".join(prefix_parts + [raw_text]).strip()
+
+
+class _FallbackMarkItDown:
+    """
+    业务功能：在本地环境缺少 markitdown 依赖时，为 txt/html 等基础文档提供最小可用解析兜底。
+    关键流程：保持 convert(file_path).text_content 接口形态不变，让 ParserFactory/MarkItDownParser 无需分支。
+    设计原因：markitdown 是通用增强解析器，不应阻断纯文本入库与权限闭环验证。
+    """
+
+    class _Result:
+        def __init__(self, text_content: str):
+            self.text_content = text_content
+
+    def convert(self, file_path: str):
+        import html
+        import re as _re
+        import pathlib
+
+        path = pathlib.Path(str(file_path))
+        suffix = path.suffix.lower()
+        raw = path.read_bytes()
+        text = raw.decode("utf-8", errors="replace")
+        if suffix in (".html", ".htm"):
+            text = _re.sub(r"(?is)<(script|style).*?>.*?</\1>", "\n", text)
+            text = _re.sub(r"(?s)<[^>]+>", "\n", text)
+            text = html.unescape(text)
+            text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+        return self._Result(text)
+
+def _extract_keywords(text: str, top_k: int) -> list:
+    """
+    业务功能：为文档级和 chunk 级索引生成关键词，优先使用 jieba TF-IDF，缺失时退化为轻量规则提取。
+    关键流程：过滤短词与纯符号，按首次出现顺序去重，保证 keywords 字段始终有稳定列表形态。
+    设计原因：关键词是检索增强字段，不应让本地权限闭环验证因为可选分词依赖缺失而整体停摆。
+    """
+    text = text or ""
+    if not text:
+        return []
+    if jieba_analyse is not None:
+        return jieba_analyse.extract_tags(text, topK=top_k)
+
+    candidates = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z][A-Za-z0-9_-]{1,}|[0-9]{2,}", text)
+    keywords = []
+    seen = set()
+    for item in candidates:
+        word = item.strip()
+        if not word or word in seen:
+            continue
+        seen.add(word)
+        keywords.append(word)
+        if len(keywords) >= top_k:
+            break
+    return keywords
 
 # [D1 根治] 删除全局串行锁：改为每次调用注入独立 UserInstallation 目录。
 # 原 _doc_com_lock 串行化所有 LO 调用，批量导入时阻塞队列积压。
@@ -34,8 +203,171 @@ ES_PASS     = os.getenv("ES_PASS",     "")
 PDF_PARSE_MIN_COVERAGE_TO_INDEX = float(os.getenv("PDF_PARSE_MIN_COVERAGE_TO_INDEX", "0.5"))
 PDF_PARSE_FULL_COVERAGE_THRESHOLD = float(os.getenv("PDF_PARSE_FULL_COVERAGE_THRESHOLD", "0.98"))
 ES_BULK_MAX_FAILURE_RATIO_TO_INDEX = float(os.getenv("ES_BULK_MAX_FAILURE_RATIO_TO_INDEX", "0.05"))
+JAVA_CALLBACK_RETRY_QUEUE = os.getenv("JAVA_CALLBACK_RETRY_QUEUE", "JAVA_CALLBACK_RETRY")
+JAVA_CALLBACK_RETRY_DELAY_SECONDS = int(os.getenv("JAVA_CALLBACK_RETRY_DELAY_SECONDS", "60"))
+JAVA_CALLBACK_RETRY_MAX_ATTEMPTS = int(os.getenv("JAVA_CALLBACK_RETRY_MAX_ATTEMPTS", "8"))
+AUXILIARY_INDEX_RETRY_QUEUE = os.getenv("AUXILIARY_INDEX_RETRY_QUEUE", "AUXILIARY_INDEX_RETRY")
+AUXILIARY_INDEX_RETRY_DELAY_SECONDS = int(os.getenv("AUXILIARY_INDEX_RETRY_DELAY_SECONDS", "60"))
+AUXILIARY_INDEX_RETRY_MAX_ATTEMPTS = int(os.getenv("AUXILIARY_INDEX_RETRY_MAX_ATTEMPTS", "8"))
+
+
+def local_search_knn_num_candidates(top_k: int) -> int:
+    """
+    业务功能：计算 RAGPipeline 本地调试语义搜索的 KNN num_candidates。
+    关键流程：通过环境变量支持运维调优；非法配置回退默认值，并确保候选数满足 ES KNN 基本约束。
+    """
+    default_value = 200
+    raw = os.getenv("RAG_LOCAL_SEARCH_KNN_NUM_CANDIDATES")
+    if raw is None or str(raw).strip() == "":
+        configured = default_value
+    else:
+        try:
+            configured = int(str(raw).strip())
+        except ValueError:
+            print(f"[RAGPipeline] invalid RAG_LOCAL_SEARCH_KNN_NUM_CANDIDATES={raw!r}, fallback to {default_value}")
+            configured = default_value
+    if configured < 1:
+        print(f"[RAGPipeline] RAG_LOCAL_SEARCH_KNN_NUM_CANDIDATES={configured} is lower than 1, fallback to {default_value}")
+        configured = default_value
+    safe_top_k = max(int(top_k or 1), 1)
+    return max(configured, safe_top_k * 2, safe_top_k)
 # [架构重构阶段一] 以下常量已迁移至 core/indexing/es_setup.py，上方 import 负责引入
 # INDEX_NAME / QA_INDEX_NAME / DOC_META_INDEX → 见 es_setup.py
+
+def enqueue_java_callback_retry(redis_client, callback_type: str, url: str, payload: dict,
+                                headers: dict = None, error: str = "", status_code=None,
+                                attempt: int = 0,
+                                delay_seconds: int = JAVA_CALLBACK_RETRY_DELAY_SECONDS) -> float:
+    """
+    业务功能：把失败的 Java 内部回调持久化到 Redis 延迟重试队列。
+    关键流程：保存回调类型、URL、请求体、Header、失败原因和尝试次数，按 retryAt 写入 sorted set。
+    设计原因：ES 主索引写入成功后，registry/权限事件回调不能只打印日志；否则会形成 ES 与数据库权威记录分裂。
+    """
+    if redis_client is None:
+        raise ValueError("redis_client is required")
+    retry_at = time.time() + max(0, int(delay_seconds or 0))
+    item = {
+        "callbackType": callback_type,
+        "url": url,
+        "payload": payload or {},
+        "headers": headers or {},
+        "lastError": str(error or "")[:1000],
+        "statusCode": status_code,
+        "attempt": int(attempt or 0),
+        "retryAt": retry_at,
+    }
+    redis_client.zadd(JAVA_CALLBACK_RETRY_QUEUE, {json.dumps(item, ensure_ascii=False): retry_at})
+    return retry_at
+
+
+def drain_due_java_callback_retries(redis_client, now: float = None, limit: int = 50) -> int:
+    """
+    业务功能：消费到期的 Java 内部回调补偿任务，成功后移除，失败后按次数重新延迟。
+    关键流程：读取到期 sorted set 成员 -> HTTP POST -> 成功删除；失败未超限则更新 attempt 后重新入队。
+    设计原因：registry、权限事件等回调属于权限闭环的一部分，必须具备自动补偿能力。
+    """
+    if redis_client is None:
+        return 0
+    now = time.time() if now is None else now
+    due_items = redis_client.zrangebyscore(JAVA_CALLBACK_RETRY_QUEUE, 0, now, start=0, num=limit)
+    if not due_items:
+        return 0
+
+    import requests as _rq
+    moved = 0
+    for raw in due_items:
+        if not redis_client.zrem(JAVA_CALLBACK_RETRY_QUEUE, raw):
+            continue
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        try:
+            item = json.loads(text)
+            resp = _rq.post(
+                item.get("url", ""),
+                json=item.get("payload") or {},
+                headers=item.get("headers") or {},
+                timeout=5.0,
+            )
+            if 200 <= resp.status_code < 300:
+                moved += 1
+                continue
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+        except Exception as exc:
+            try:
+                item = json.loads(text)
+            except Exception:
+                item = {"callbackType": "UNKNOWN", "url": "", "payload": {}, "headers": {}}
+            attempt = int(item.get("attempt") or 0) + 1
+            if attempt >= JAVA_CALLBACK_RETRY_MAX_ATTEMPTS:
+                item["lastError"] = f"max attempts reached: {exc}"[:1000]
+                redis_client.lpush(f"{JAVA_CALLBACK_RETRY_QUEUE}_DLQ", json.dumps(item, ensure_ascii=False))
+                continue
+            enqueue_java_callback_retry(
+                redis_client,
+                item.get("callbackType", "UNKNOWN"),
+                item.get("url", ""),
+                item.get("payload") or {},
+                headers=item.get("headers") or {},
+                error=str(exc),
+                attempt=attempt,
+            )
+    return moved
+
+
+def _enqueue_java_callback_retry_from_env(callback_type: str, url: str, payload: dict,
+                                          headers: dict, error: str, status_code=None) -> None:
+    """
+    业务功能：在 RAGPipeline 回调 Java 失败时，按环境变量连接 Redis 并写入补偿队列。
+    关键流程：懒加载 redis 依赖 -> 使用 REDIS_HOST/REDIS_PORT/REDIS_PASSWORD -> 写入延迟重试。
+    设计原因：回调失败发生在后台线程中，不能向主流程抛错，但必须留下可恢复的持久化任务。
+    """
+    try:
+        import redis as _redis
+        client = _redis.Redis(
+            host=os.getenv("REDIS_HOST", "redis"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            password=os.getenv("REDIS_PASSWORD") or None,
+            decode_responses=True,
+        )
+        retry_at = enqueue_java_callback_retry(
+            client, callback_type, url, payload, headers=headers,
+            error=error, status_code=status_code,
+        )
+        client.close()
+        print(f"[JavaCallbackRetry] queued type={callback_type} retryAt={int(retry_at)}")
+    except Exception as queue_err:
+        print(f"[JavaCallbackRetry] queue failed type={callback_type}: {queue_err}")
+
+
+def _enqueue_auxiliary_index_retry_from_env(source_name: str, target_index: str,
+                                            failed_target: str, error: str) -> None:
+    """
+    业务功能：辅助索引同步失败时写入 Redis 延迟补偿队列。
+    关键流程：只记录文档 source、主 chunk 索引和失败的辅助索引类型，不保存 chunk/vector 大对象。
+    设计原因：kb_doc_meta/kb_doc_search 是可从 chunk 事实源重建的性能索引，失败补偿应轻量且幂等。
+    """
+    try:
+        import redis as _redis
+        client = _redis.Redis(
+            host=os.getenv("REDIS_HOST", "redis"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            password=os.getenv("REDIS_PASSWORD") or None,
+            decode_responses=True,
+        )
+        retry_at = time.time() + max(0, AUXILIARY_INDEX_RETRY_DELAY_SECONDS)
+        payload = {
+            "sourceName": source_name,
+            "targetIndex": target_index,
+            "failedTarget": failed_target,
+            "lastError": str(error or "")[:1000],
+            "attempt": 0,
+            "retryAt": retry_at,
+        }
+        client.zadd(AUXILIARY_INDEX_RETRY_QUEUE, {json.dumps(payload, ensure_ascii=False): retry_at})
+        client.close()
+        print(f"[AuxIndexRetry] queued source={source_name} target={failed_target} retryAt={int(retry_at)}")
+    except Exception as queue_err:
+        print(f"[AuxIndexRetry] queue failed source={source_name} target={failed_target}: {queue_err}")
+
 
 class RAGPipeline:
     def __init__(self):
@@ -51,7 +383,9 @@ class RAGPipeline:
         # [架构重构阶段一] 文本净化委托给 TextCleaner，替代原 _clean_raw_text 静态方法
         self.cleaner = TextCleaner()
         self.noise_classifier = NoiseClassifier(self.cleaner)
-        self.md_converter = MarkItDown()
+        self.md_converter = MarkItDown() if MarkItDown is not None else _FallbackMarkItDown()
+        if MarkItDown is None:
+            print("[RAGPipeline] markitdown 未安装，启用 txt/html 最小解析兜底")
         # [架构重构阶段二] 文档解析委托给 ParserFactory，替代原 extract_text 超级方法
         self.parser_factory = ParserFactory(self.md_converter)
         # [架构重构阶段四] 内容去重和写入委托给独立组件
@@ -136,6 +470,7 @@ class RAGPipeline:
         if not self.es.indices.exists(index=INDEX_NAME):
             print(f"⚠️ 索引 {INDEX_NAME} 不存在，正在自动创建...")
             mapping = {
+                "settings": document_index_settings(),
                 "mappings": {
                     "properties": {
                         "content": {
@@ -194,11 +529,6 @@ class RAGPipeline:
                         "chunk_granularity": {"type": "keyword"},
                         "parent_chunk_id":   {"type": "keyword"},
                         "sparse_vector":     {"type": "rank_features"},
-                        "colloquial_vector": {
-                            "type": "dense_vector",
-                            "dims": 1024,
-                            "index": False  # [Fix] 无检索逻辑使用，index:false 消除冗余 HNSW
-                        },
                         "metadata": {
                             "properties": {
                                 "document_number": {"type": "keyword"},
@@ -243,19 +573,7 @@ class RAGPipeline:
         if self.es.indices.exists(index=QA_INDEX_NAME):
             return
         print(f"⚠️ 创建 Q&A 索引 {QA_INDEX_NAME}...")
-        self.es.indices.create(index=QA_INDEX_NAME, body={
-            "mappings": {
-                "properties": {
-                    "question":    {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
-                    "question_vector": {"type": "dense_vector", "dims": 1024, "index": True, "similarity": "cosine"},
-                    "answer_content":  {"type": "text"},
-                    "answer_chunk_id": {"type": "keyword"},
-                    "section_path":    {"type": "keyword"},
-                    "source":          {"type": "keyword"},
-                    "is_latest":       {"type": "boolean"}
-                }
-            }
-        })
+        self.es.indices.create(index=QA_INDEX_NAME, body=qa_index_mapping())
         print(f"✅ Q&A 索引 {QA_INDEX_NAME} 创建成功！")
 
     def _ensure_index_template(self):
@@ -279,8 +597,7 @@ class RAGPipeline:
                             "kb_document": {}  # 别名，Java 侧通过此别名查询无需关心具体版本号
                         },
                         "settings": {
-                            "number_of_shards": 1,
-                            "number_of_replicas": 0,
+                            **document_index_settings(),
                             "analysis": {
                                 "analyzer": {
                                     "ik_smart": {"type": "custom", "tokenizer": "ik_smart"},
@@ -293,10 +610,15 @@ class RAGPipeline:
                                 "content":  {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
                                 "vector":   {"type": "dense_vector", "dims": 1024, "index": True, "similarity": "cosine"},
                                 "sparse_vector":     {"type": "rank_features"},
-                                "colloquial_vector": {"type": "dense_vector", "dims": 1024, "index": False},  # [Fix]
                                 "chunk_granularity": {"type": "keyword"},
                                 "parent_chunk_id":   {"type": "keyword"},
                                 "keywords":          {"type": "keyword"},
+                                "acl_tokens":        {"type": "keyword"},
+                                "source_index":      {"type": "keyword"},
+                                "index_code":        {"type": "keyword"},
+                                "owner_unit_code":   {"type": "keyword"},
+                                "visible_unit_codes": {"type": "keyword"},
+                                "permission_version": {"type": "long"},
                                 "metadata": {
                                     "properties": {
                                         "source":       {"type": "keyword"},
@@ -318,6 +640,12 @@ class RAGPipeline:
                                         "quality_score":{"type": "float"},
                                         "data_source":  {"type": "keyword"},
                                         "owner_dept_id":{"type": "keyword"},
+                                        "acl_tokens":   {"type": "keyword"},
+                                        "source_index": {"type": "keyword"},
+                                        "index_code": {"type": "keyword"},
+                                        "owner_unit_code": {"type": "keyword"},
+                                        "visible_unit_codes": {"type": "keyword"},
+                                        "permission_version": {"type": "long"},
                                         "publish_time": {"type": "date", "format": "yyyy-MM-dd||epoch_millis"},
                                         "document_number": {"type": "keyword"},
                                         "dynamic_meta": {"type": "object", "dynamic": False},  # [Fix] 防字段爆炸
@@ -362,6 +690,41 @@ class RAGPipeline:
             "dept_l6":        code[:6]  if len(code) >= 6  else code,
             "dept_l9":        code[:9]  if len(code) >= 9  else code,
             "dept_code_full": code,
+        }
+
+    def _qa_permission_projection(self, source_index: str, ext_metadata: dict = None) -> dict:
+        """
+        构建 QA 索引的文档级权限投影字段。
+
+        业务功能：
+          QA 索引是聚合索引，不随 chunk 物理索引拆分。为了后续按角色可读索引过滤 QA 候选，
+          新写入的 QA 记录必须携带原 chunk 物理索引和单位权限字段。
+
+        关键流程：
+          1. source_index 记录真实写入的 kb_document_* 物理索引；
+          2. index_code 使用物理索引短码，便于后续配置和聚合统计；
+          3. 单位字段优先使用 ext_metadata 中的显式值，缺失时保持空值兼容旧数据。
+        """
+        meta = ext_metadata or {}
+        physical_index = (source_index or "").strip()
+        index_code = physical_index
+        if index_code.startswith("kb_document_"):
+            index_code = index_code[len("kb_document_"):]
+        visible_units = meta.get("visible_unit_codes") or meta.get("visible_depts") or meta.get("owner_dept_id") or []
+        if isinstance(visible_units, str):
+            visible_units = [v.strip() for v in visible_units.split(",") if v.strip()]
+        elif not isinstance(visible_units, list):
+            visible_units = []
+        try:
+            permission_version = int(meta.get("permission_version") or 0)
+        except (TypeError, ValueError):
+            permission_version = 0
+        return {
+            "source_index": physical_index,
+            "index_code": index_code,
+            "owner_unit_code": meta.get("owner_unit_code") or meta.get("owner_dept_id") or "",
+            "visible_unit_codes": visible_units,
+            "permission_version": permission_version,
         }
 
     def _get_next_version(self, source_name: str) -> int:
@@ -1038,7 +1401,7 @@ class RAGPipeline:
             raw_fallback = self.parser_factory.parse(file_path, parse_options=_parse_opts)
             elements = self.parser_factory._wrap_text_elements(raw_fallback, "fallback")
 
-        source_name = original_name if original_name else os.path.basename(file_path)
+        source_name = normalize_filename(original_name if original_name else os.path.basename(file_path))
 
         # RAGPipeline 质量门控 Quality Gate
         report = _report_ctx.get("report")
@@ -1108,7 +1471,7 @@ class RAGPipeline:
 
         # --- 关键字提取 (取文章前 3000 字提取 Top 10) ---
         analysis_text = raw_text[:3000] if raw_text else ""
-        keywords = jieba.analyse.extract_tags(analysis_text, topK=10)
+        keywords = _extract_keywords(analysis_text, top_k=10)
 
         # 将 doc_meta 中提取到的文号等特征词合并入关键词列表
         if doc_meta:
@@ -1126,13 +1489,13 @@ class RAGPipeline:
         # 修复：删除第一次冗余调用，仅保留下方的双粒度调用，日志移至真正切片后打印。
         
         actions = []
-        source_name = original_name if original_name else os.path.basename(file_path)
+        source_name = normalize_filename(original_name if original_name else os.path.basename(file_path))
         ext_metadata = ext_metadata or {}
         ext_metadata["noise_report"] = noise_report
 
         # [标题检索修复] 提取文档标题，流程跳过切片循环外侧执行一次
         # doc_title 优先级： Java 传入 ext_metadata["title"] > Markdown H1 > 文件名去后缀
-        doc_title = ext_metadata.get("title") or self._extract_doc_title(raw_text, source_name)
+        doc_title = normalize_metadata_text(ext_metadata.get("title") or self._extract_doc_title(raw_text, source_name))
         if isinstance(doc_title, str):
             doc_title = doc_title.replace("|", "").strip()
 
@@ -1187,29 +1550,12 @@ class RAGPipeline:
         version_at   = int(time.time() * 1000)
         uploader_id  = ext_metadata.get("uploader_id", "system")
         visibility   = ext_metadata.get("visibility", "PUBLIC")
-        acl_tokens_json = ext_metadata.get("acl_tokens_json", "")
-        # [D2 V2 修复] 使用 JSON 数组反序列化替代逗号字符串分割
-        # 根因：逗号分割无法处理 token 中包含逗号的边缘情况（如未来角色名包含逗号）
-        # 降级策略：JSON 为空时降级为 _INTERNAL（比 _PUBLIC 更安全，防止数据泄露）
-        if acl_tokens_json:
-            try:
-                import json as _json_lib
-                acl_tokens = _json_lib.loads(acl_tokens_json)
-                if not isinstance(acl_tokens, list) or len(acl_tokens) == 0:
-                    raise ValueError("acl_tokens_json 解析结果为空列表")
-            except Exception as _e:
-                print(f"[WARN][ACL] acl_tokens_json 解析失败，降级为 _INTERNAL: {_e}")
-                acl_tokens = ["_INTERNAL"]
-        else:
-            # Java 端未传 acl_tokens_json（兼容老版本部署过渡期）
-            # 尝试兜底读取旧字段 acl_tokens（逗号字符串），最终降级为 _INTERNAL
-            _legacy_tokens_str = ext_metadata.get("acl_tokens", "")
-            if _legacy_tokens_str:
-                acl_tokens = [t.strip() for t in _legacy_tokens_str.split(",") if t.strip()]
-                print(f"[WARN][ACL] 使用遗留 acl_tokens 字段（逗号格式），建议升级 Java 端: {acl_tokens}")
-            else:
-                print(f"[WARN][ACL] acl_tokens_json 为空且无遗留字段，降级为 _INTERNAL，source={source_name}")
-                acl_tokens = ["_INTERNAL"]
+        acl_missing_policy = os.getenv("KB_INGEST_MISSING_ACL_POLICY", "no_access")
+        acl_tokens = resolve_acl_tokens_from_metadata(ext_metadata, missing_policy=acl_missing_policy)
+        if acl_tokens == ["_INTERNAL"] and not ext_metadata.get("acl_tokens_json") and not ext_metadata.get("acl_tokens"):
+            print(f"[WARN][ACL] acl_tokens 缺失，按策略 {acl_missing_policy} 处理为 _INTERNAL，source={source_name}")
+        elif acl_tokens == ["_NO_ACCESS"]:
+            print(f"[WARN][ACL] acl_tokens 缺失或非法，按策略 {acl_missing_policy} 处理为 _NO_ACCESS，source={source_name}")
         dept_levels  = self._compute_dept_levels(ext_metadata.get("dept_code"))
         access_groups = ext_metadata.get("access_groups") or []
         # tags_kw：keyword 类型的标签列表（区别于原有 text 类型的 tags 字段）
@@ -1253,11 +1599,41 @@ class RAGPipeline:
                 continue
             valid_chunk_pairs.append((i, chunk, granularity))
 
-        # [P0-5A] 向量化使用裸文（raw_content），不含面包屑前缀
+        # [P1] 向量化输入默认保持裸文；可通过 EMBEDDING_CONTEXT_MODE 灰度加入章节/标题上下文。
+        embedding_context_mode = resolve_embedding_context_mode()
         texts_to_encode = [
-            (chunk.raw_content if chunk.raw_content else chunk.content)
+            build_embedding_input_text(chunk, doc_title=doc_title, context_mode=embedding_context_mode)
             for _, chunk, _ in valid_chunk_pairs
         ]
+        vectorization_report = {
+            "embedding_input_mode": embedding_context_mode,
+            "valid_chunk_count": len(valid_chunk_pairs),
+            "truncation_policy": resolve_embedding_truncation_policy(),
+        }
+        try:
+            token_stats = model_manager.embedding_token_stats(texts_to_encode)
+            vectorization_report["token_stats"] = token_stats
+            if token_stats.get("truncated_count", 0) > 0:
+                truncation_message = build_embedding_truncation_error(token_stats, source_name)
+                vectorization_report["truncation_message"] = truncation_message
+                if vectorization_report["truncation_policy"] == "fail":
+                    if report_data is None:
+                        report_data = {}
+                    report_data["vectorization"] = vectorization_report
+                    return {
+                        "status": "error",
+                        "reason": "embedding_truncation_risk",
+                        "message": truncation_message,
+                        "parseStatus": "PARSE_FAILED",
+                        "report": report_data,
+                    }
+                print(f"[Vectorization][WARN] {truncation_message}")
+        except Exception as token_stat_err:
+            vectorization_report["token_stats_error"] = str(token_stat_err)
+            print(f"[Vectorization][WARN] token 统计失败，不阻断入库: {token_stat_err}")
+        if report_data is None:
+            report_data = {}
+        report_data["vectorization"] = vectorization_report
 
         # [性能优化] encode_dual：单次 ONNX 前向推理同时产出 dense + sparse 两路向量。
         # 根因：原代码两次独立调用 encode() + encode_sparse() = 两次完整 GPU 前向传播，
@@ -1284,6 +1660,22 @@ class RAGPipeline:
             print(f"[{source_name}] 双路向量化完成，耗时: {time.time() - t_vec_start:.3f} 秒 "
                   f"(dense={len(batch_vectors)}, sparse={len(batch_sparse_vectors)})")
 
+        try:
+            validate_dense_vectors_for_indexing(batch_vectors, len(valid_chunk_pairs), source_name)
+        except ValueError as vector_err:
+            return {
+                "status": "error",
+                "reason": "dense_vector_validation_failed",
+                "message": str(vector_err),
+                "parseStatus": "PARSE_FAILED",
+                "report": report_data or {
+                    "vectorization": {
+                        "expected_dense_vectors": len(valid_chunk_pairs),
+                        "actual_dense_vectors": len(batch_vectors),
+                    }
+                },
+            }
+
 
         # [轨道B] 在循环外提前确定实际写入目标（写别名 or 物理索引名），避免每 chunk 重复查元数据
         _write_alias_name = f"{target_index}_write"
@@ -1294,10 +1686,11 @@ class RAGPipeline:
         )
         if _bulk_target_index != target_index:
             print(f"  [轨道B] bulk 写入走写别名: {_bulk_target_index}")
+        permission_projection = self._qa_permission_projection(target_index, ext_metadata)
 
         for idx, (original_i, chunk, granularity) in enumerate(valid_chunk_pairs):
             # 获取批量计算的稠密向量结果
-            vector = batch_vectors[idx] if idx < len(batch_vectors) else [0.0] * 1024
+            vector = batch_vectors[idx]
             # 获取稀疏向量（降级时为空字典，ES 该字段不写入）
             sparse_vector = batch_sparse_vectors[idx] if idx < len(batch_sparse_vectors) else {}
 
@@ -1323,7 +1716,7 @@ class RAGPipeline:
             # 根因：文档级关键词导致不同章节的 chunk 共享同一关键词，使 BM25 分均假膈胀
             # 不加入 doc_meta 数据（文号/机构名）以避免未干迟内容匹配
             _raw_for_kw = chunk.raw_content if chunk.raw_content else chunk.content
-            chunk_keywords = jieba.analyse.extract_tags(_raw_for_kw, topK=5)
+            chunk_keywords = _extract_keywords(_raw_for_kw, top_k=5)
             # doc_meta 提取的特殊元数据字段（文号等）操作性强则合并入关键词
             _meta_vals = [v for v in (doc_meta or {}).values() if v and v not in chunk_keywords]
             if _meta_vals:
@@ -1352,6 +1745,11 @@ class RAGPipeline:
                     "parent_chunk_id":  parent_chunk_id,
                     "keywords":         chunk_keywords,   # [P1-3A] chunk 级独立关键词
                     "acl_tokens":       acl_tokens,
+                    "source_index":     permission_projection["source_index"],
+                    "index_code":       permission_projection["index_code"],
+                    "owner_unit_code":  permission_projection["owner_unit_code"],
+                    "visible_unit_codes": permission_projection["visible_unit_codes"],
+                    "permission_version": permission_projection["permission_version"],
                     "metadata": {
                         "source":           source_name,
                         "title":            doc_title,   # [标题检索修复] 文档标题，独立 text 字段支持分词检索
@@ -1390,6 +1788,11 @@ class RAGPipeline:
                         "search_queries":   ext_metadata.get("searchQueries") if ext_metadata else None,
                         "data_source":      ext_metadata.get("data_source", "document") if ext_metadata else "document",
                         "owner_dept_id":    dept_levels.get("dept_code_full") or "global",
+                        "source_index":     permission_projection["source_index"],
+                        "index_code":       permission_projection["index_code"],
+                        "owner_unit_code":  permission_projection["owner_unit_code"],
+                        "visible_unit_codes": permission_projection["visible_unit_codes"],
+                        "permission_version": permission_projection["permission_version"],
                         "doc_type":         doc_type,   # [Task7] 文档类型（法规/通知/报告/新闻/会议纪要/通用）
                         # [Phase3] 前言标记：CoarseChunker 识别的公文开头引言段落
                         # is_preamble=True 时，RrfFusionStep 会额外降权 50%，
@@ -1468,6 +1871,10 @@ class RAGPipeline:
                     "sourceName":    source_name,      # 与消费端 get("sourceName") 对齐
                     "fileBaseHash":  file_base_hash,   # 与消费端 get("fileBaseHash") 对齐
                     "docVersion":    new_version,      # [版本化] 消费端透传给 _generate_and_index_qa_pairs
+                    "targetIndex":    target_index,     # QA 聚合索引用于记录原 chunk 物理索引
+                    "ownerUnitCode":  ext_metadata.get("owner_unit_code") or ext_metadata.get("owner_dept_id") or "",
+                    "visibleUnitCodes": ext_metadata.get("visible_unit_codes") or ext_metadata.get("visible_depts") or [],
+                    "permissionVersion": ext_metadata.get("permission_version") or 0,
                     "acl_tokens":    acl_tokens,
                     # 取前 50 个 fine chunk（限制 payload 体积）
                     # 内容是条文/短句级，单个 chunk 内容一般 < 500 字
@@ -1490,7 +1897,15 @@ class RAGPipeline:
                 def _bg_qa_fallback():
                     try:
                         # [版本化] 降级线程同样传入 new_version，与 Redis 路径行为一致
-                        self._generate_and_index_qa_pairs(fine_chunks, source_name, file_base_hash, acl_tokens, doc_version=new_version)
+                        self._generate_and_index_qa_pairs(
+                            fine_chunks,
+                            source_name,
+                            file_base_hash,
+                            acl_tokens,
+                            doc_version=new_version,
+                            source_index=target_index,
+                            ext_metadata=ext_metadata,
+                        )
                     except Exception as _qa_err:
                         print(f"⚠️ [Q&A] 生成失败: {_qa_err}")
                 threading.Thread(target=_bg_qa_fallback, daemon=False).start()
@@ -1506,9 +1921,11 @@ class RAGPipeline:
                 acl_tokens=acl_tokens,
                 doc_id=f"{file_base_hash}_v{new_version}",
                 doc_version=new_version,
+                source_index=target_index,
             )
         except Exception as meta_err:
             print(f"⚠️ [DocMeta] 更新 kb_doc_meta 失败（不影响主索引）: {meta_err}")
+            _enqueue_auxiliary_index_retry_from_env(source_name, target_index, "kb_doc_meta", str(meta_err))
 
         try:
             self.doc_indexer.update_doc_search(
@@ -1519,6 +1936,7 @@ class RAGPipeline:
                 acl_tokens=acl_tokens,
                 doc_id=f"{file_base_hash}_v{new_version}",
                 doc_version=new_version,
+                source_index=target_index,
             )
         except Exception as search_err:
             print(f"⚠️ [DocSearch] 更新 kb_doc_search 失败，1s 后重试: {search_err}")
@@ -1532,10 +1950,12 @@ class RAGPipeline:
                     acl_tokens=acl_tokens,
                     doc_id=f"{file_base_hash}_v{new_version}",
                     doc_version=new_version,
+                    source_index=target_index,
                 )
                 print(f"✅ [DocSearch] 重试成功: '{source_name}'")
             except Exception as retry_err:
                 print(f"❌ [DocSearch] 重试仍失败（不影响主索引）: {retry_err}")
+                _enqueue_auxiliary_index_retry_from_env(source_name, target_index, "kb_doc_search", str(retry_err))
 
         # [C5] 权限事件回调 & [文档注册] 写入 kb_doc_registry
         # [Task 4] 将高延迟的跨服务 HTTP 调用转入后台纯异步线程，防止阻塞主流响应
@@ -1553,16 +1973,30 @@ class RAGPipeline:
                     "visibility":  visibility,
                     "deptCode":    ext_metadata.get("dept_code") if ext_metadata else None
                 }
-                resp = _rq.post(f"{java_host}/api/doc/perm/record",
+                _perm_url = f"{java_host}/api/doc/perm/record"
+                _headers = {"X-Internal-Token": internal_token}
+                resp = _rq.post(_perm_url,
                                 json=perm_payload,
-                                headers={"X-Internal-Token": internal_token},
+                                headers=_headers,
                                 timeout=5.0)
                 if resp.status_code == 200:
                     print(f"✅ [C5 PermEvent] '{source_name}' v{new_version} 权限事件已写入 PG")
                 else:
                     print(f"⚠️ [C5 PermEvent] Java 侧返回异常: {resp.status_code}")
+                    _enqueue_java_callback_retry_from_env(
+                        "PERMISSION_EVENT", _perm_url, perm_payload, _headers,
+                        f"HTTP {resp.status_code}: {resp.text[:300]}",
+                        status_code=resp.status_code,
+                    )
             except Exception as perm_err:
                 print(f"⚠️ [C5 PermEvent] 权限事件写入失败（ES 入库不受影响）: {perm_err}")
+                _enqueue_java_callback_retry_from_env(
+                    "PERMISSION_EVENT",
+                    f"{os.getenv('JAVA_SERVICE_HOST', 'http://127.0.0.1:8080')}/api/doc/perm/record",
+                    locals().get("perm_payload", {}),
+                    {"X-Internal-Token": os.getenv("KB_INTERNAL_TOKEN", "kb-dev-token-change-me-in-prod")},
+                    str(perm_err),
+                )
 
             try:
                 import requests as _rq
@@ -1613,16 +2047,30 @@ class RAGPipeline:
                     "parseStatus":  parse_status,
                     "report":       report_data,
                 }
-                resp = _rq.post(f"{java_host}/api/v1/internal/doc/registry",
+                _registry_url = f"{java_host}/api/v1/internal/doc/registry"
+                _headers = {"X-Internal-Token": internal_token}
+                resp = _rq.post(_registry_url,
                                 json=registry_payload,
-                                headers={"X-Internal-Token": internal_token},
+                                headers=_headers,
                                 timeout=5.0)
                 if resp.status_code == 200:
                     print(f"✅ [DocRegistry] '{source_name}' v{new_version} 已写入 kb_doc_registry")
                 else:
                     print(f"⚠️ [DocRegistry] Java 侧返回异常: {resp.status_code}")
+                    _enqueue_java_callback_retry_from_env(
+                        "DOC_REGISTRY", _registry_url, registry_payload, _headers,
+                        f"HTTP {resp.status_code}: {resp.text[:300]}",
+                        status_code=resp.status_code,
+                    )
             except Exception as reg_err:
                 print(f"⚠️ [DocRegistry] registry 写入失败（ES 入库不受影响）: {reg_err}")
+                _enqueue_java_callback_retry_from_env(
+                    "DOC_REGISTRY",
+                    f"{os.getenv('JAVA_SERVICE_HOST', 'http://127.0.0.1:8080')}/api/v1/internal/doc/registry",
+                    locals().get("registry_payload", {}),
+                    {"X-Internal-Token": os.getenv("KB_INTERNAL_TOKEN", "kb-dev-token-change-me-in-prod")},
+                    str(reg_err),
+                )
 
         # [BUG-11 根治] daemon=False：重启时此线程会等待完成，防止 Java 权限/注册事件静默丢失
         # 根因：daemon=True 的线程在主进程退出时被 OS 强制终止，正在进行的 perm/registry 请求丢失
@@ -1807,13 +2255,15 @@ class RAGPipeline:
             "content_hash": content_hash,
             # [2PC 重构] 只有主数据切片用 True/False 控制，META 属于直接覆盖，设为 True
             "is_latest":    True,
-            "acl_tokens":   os.getenv("KB_DOC_META_DEFAULT_ACL_TOKENS", "_INTERNAL").split(","),
+            "acl_tokens":   os.getenv("KB_DOC_META_DEFAULT_ACL_TOKENS", "_NO_ACCESS").split(","),
         }
         self.es.index(index=META_INDEX, id=doc_id, body=body)
         print(f"✅ [DocMeta] {META_INDEX} 已同步: '{source_name}' ({len(fine_vectors)} fine chunks → doc_vector)")
 
 
-    def _generate_and_index_qa_pairs(self, fine_chunks, source_name: str, file_base_hash: str, acl_tokens: list, doc_version: int = 0):
+    def _generate_and_index_qa_pairs(self, fine_chunks, source_name: str, file_base_hash: str,
+                                     acl_tokens: list, doc_version: int = 0,
+                                     source_index: str = "", ext_metadata: dict = None):
         """
         QA 入库流程协调者（Orchestrator）。
 
@@ -1840,6 +2290,7 @@ class RAGPipeline:
         """
         from types import SimpleNamespace as _NS
         from core.qa_generator import qa_generator   # [DIP] 依赖 QAGenerator，不再依赖 HTTP
+        qa_permission = self._qa_permission_projection(source_index, ext_metadata)
 
         # ── [0] 类型归一化：统一 dict 和 Chunk 对象的访问方式 ────────────────
         # 确保后续代码对来自 Redis（dict）和 process_and_index（Chunk对象）的两种来源均有效
@@ -1912,6 +2363,11 @@ class RAGPipeline:
                     "doc_hash":        file_base_hash,
                     "section_path":    chunk.section_path or "",
                     "source":          source_name,
+                    "source_index":    qa_permission["source_index"],
+                    "index_code":      qa_permission["index_code"],
+                    "owner_unit_code": qa_permission["owner_unit_code"],
+                    "visible_unit_codes": qa_permission["visible_unit_codes"],
+                    "permission_version": qa_permission["permission_version"],
                     "doc_version":     doc_version,   # 供 Java registerDoc 2PC 精确版本匹配
                     "is_latest":       True,          # 写入时 True，由 registerDoc 回调降级旧版
                     "acl_tokens":      acl_tokens
@@ -1940,23 +2396,10 @@ class RAGPipeline:
                 "field": "vector",
                 "query_vector": query_vector,
                 "k": top_k,
-                "num_candidates": 100
+                "num_candidates": local_search_knn_num_candidates(top_k)
             },
             "_source": ["content", "metadata"]
         })
-        return res['hits']['hits']
-        
-        search_query = {
-            "knn": {
-                "field": "vector",
-                "query_vector": query_vector,
-                "k": top_k,
-                "num_candidates": 100
-            },
-            "_source": ["content", "metadata"]
-        }
-        
-        res = self.es.search(index=INDEX_NAME, body=search_query)
         return res['hits']['hits']
 
     def _process_single(self, file_path):

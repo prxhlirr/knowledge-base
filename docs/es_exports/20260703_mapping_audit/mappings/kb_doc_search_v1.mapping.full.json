@@ -1,0 +1,171 @@
+{
+  "kb_doc_search_v1": {
+    "mappings": {
+      "dynamic": "strict",
+      "properties": {
+        "acl_tokens": {
+          "type": "keyword"
+        },
+        "chunk_count": {
+          "type": "integer"
+        },
+        "content": {
+          "analyzer": "ik_max_word",
+          "fields": {
+            "keyword": {
+              "ignore_above": 256,
+              "type": "keyword"
+            }
+          },
+          "type": "text"
+        },
+        "content_hash": {
+          "type": "keyword"
+        },
+        "data_source": {
+          "type": "keyword"
+        },
+        "doc_id": {
+          "type": "keyword"
+        },
+        "doc_terms": {
+          "analyzer": "ik_max_word",
+          "search_analyzer": "ik_smart",
+          "type": "text"
+        },
+        "doc_title": {
+          "analyzer": "ik_max_word",
+          "fields": {
+            "keyword": {
+              "type": "keyword"
+            }
+          },
+          "type": "text"
+        },
+        "doc_type": {
+          "type": "keyword"
+        },
+        "doc_version": {
+          "type": "integer"
+        },
+        "document_number": {
+          "fields": {
+            "ngram": {
+              "analyzer": "doc_ngram",
+              "type": "text"
+            },
+            "text": {
+              "analyzer": "ik_max_word",
+              "search_analyzer": "ik_smart",
+              "type": "text"
+            }
+          },
+          "type": "keyword"
+        },
+        "entities": {
+          "type": "keyword"
+        },
+        "index_code": {
+          "type": "keyword"
+        },
+        "is_latest": {
+          "type": "boolean"
+        },
+        "keywords": {
+          "type": "keyword"
+        },
+        "owner_dept_id": {
+          "type": "keyword"
+        },
+        "owner_unit_code": {
+          "type": "keyword"
+        },
+        "permission_version": {
+          "type": "long"
+        },
+        "publish_time": {
+          "format": "yyyy-MM-dd||epoch_millis",
+          "type": "date"
+        },
+        "representative_chunk_ids": {
+          "type": "keyword"
+        },
+        "section_titles": {
+          "analyzer": "ik_max_word",
+          "search_analyzer": "ik_smart",
+          "type": "text"
+        },
+        "security_level": {
+          "type": "integer"
+        },
+        "source": {
+          "fields": {
+            "ngram": {
+              "analyzer": "doc_ngram",
+              "type": "text"
+            },
+            "text": {
+              "analyzer": "ik_max_word",
+              "search_analyzer": "ik_smart",
+              "type": "text"
+            }
+          },
+          "type": "keyword"
+        },
+        "source_index": {
+          "type": "keyword"
+        },
+        "source_name": {
+          "type": "keyword"
+        },
+        "summary": {
+          "analyzer": "ik_max_word",
+          "search_analyzer": "ik_smart",
+          "type": "text"
+        },
+        "tags": {
+          "type": "keyword"
+        },
+        "title": {
+          "analyzer": "ik_max_word",
+          "fields": {
+            "keyword": {
+              "ignore_above": 256,
+              "type": "keyword"
+            },
+            "ngram": {
+              "analyzer": "doc_ngram",
+              "type": "text"
+            }
+          },
+          "search_analyzer": "ik_smart",
+          "type": "text"
+        },
+        "updated_at": {
+          "format": "epoch_millis",
+          "type": "date"
+        },
+        "vector": {
+          "dims": 1024,
+          "index": true,
+          "index_options": {
+            "ef_construction": 100,
+            "m": 16,
+            "type": "hnsw"
+          },
+          "similarity": "cosine",
+          "type": "dense_vector"
+        },
+        "visibility": {
+          "type": "keyword"
+        },
+        "visible_depts": {
+          "type": "keyword"
+        },
+        "visible_unit_codes": {
+          "type": "keyword"
+        }
+      }
+    }
+  }
+}

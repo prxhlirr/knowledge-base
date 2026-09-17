@@ -26,6 +26,8 @@ public class KbAclProjectionTask {
     private String subjectValue;
     private String aclToken;
     private String operation;
+    private String taskType;
+    private String payloadJson;
     private String status;
     private Integer retryCount;
     private LocalDateTime nextRetryAt;

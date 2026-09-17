@@ -1,0 +1,92 @@
+[
+  {
+    "alias": "kb_document",
+    "index": "kb_document_public",
+    "is_write_index": "-"
+  },
+  {
+    "alias": "kb_document_public_write",
+    "index": "kb_document_public",
+    "is_write_index": "true"
+  },
+  {
+    "alias": "kb_document",
+    "index": "kb_document_official",
+    "is_write_index": "-"
+  },
+  {
+    "alias": "kb_document_official_write",
+    "index": "kb_document_official",
+    "is_write_index": "true"
+  },
+  {
+    "alias": "kb_qa_read",
+    "index": "kb_qa_pairs_v2",
+    "is_write_index": "-"
+  },
+  {
+    "alias": "kb_qa_write",
+    "index": "kb_qa_pairs_v2",
+    "is_write_index": "true"
+  },
+  {
+    "alias": "kb_document",
+    "index": "kb_document_law",
+    "is_write_index": "-"
+  },
+  {
+    "alias": "kb_document_law_write",
+    "index": "kb_document_law",
+    "is_write_index": "true"
+  },
+  {
+    "alias": "kb_doc_meta_read",
+    "index": "kb_doc_meta_v2",
+    "is_write_index": "-"
+  },
+  {
+    "alias": "kb_doc_meta_write",
+    "index": "kb_doc_meta_v2",
+    "is_write_index": "true"
+  },
+  {
+    "alias": "kb_doc_search",
+    "index": "kb_doc_search_v1",
+    "is_write_index": "-"
+  },
+  {
+    "alias": "kb_doc_search_write",
+    "index": "kb_doc_search_v1",
+    "is_write_index": "true"
+  },
+  {
+    "alias": "kb_document",
+    "index": "kb_document_notice",
+    "is_write_index": "-"
+  },
+  {
+    "alias": "kb_document_notice_write",
+    "index": "kb_document_notice",
+    "is_write_index": "true"
+  },
+  {
+    "alias": "kb_document",
+    "index": "kb_document_news",
+    "is_write_index": "-"
+  },
+  {
+    "alias": "kb_document_news_write",
+    "index": "kb_document_news",
+    "is_write_index": "true"
+  },
+  {
+    "alias": "kb_document",
+    "index": "kb_document_v1",
+    "is_write_index": "-"
+  },
+  {
+    "alias": "kb_document_v1_write",
+    "index": "kb_document_v1",
+    "is_write_index": "true"
+  }
+]

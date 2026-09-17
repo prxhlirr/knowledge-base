@@ -1,0 +1,22 @@
+{
+  "mode": "dry-run",
+  "index": "kb_document_*",
+  "es_host": "http://localhost:9200",
+  "batch_size": 200,
+  "limit": 1000,
+  "sample": 20,
+  "pg_enabled": true,
+  "default_owner": "global",
+  "started_at": 1783299487346,
+  "finished_at": 1783299487388,
+  "stats": {
+    "scanned": 0,
+    "dry_run_updates": 0,
+    "written": 0,
+    "failed": 0,
+    "owner_from_es": 0,
+    "owner_from_pg": 0,
+    "owner_defaulted": 0,
+    "skipped_non_document_index": 0
+  }
+}

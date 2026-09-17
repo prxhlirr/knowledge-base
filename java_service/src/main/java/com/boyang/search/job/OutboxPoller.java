@@ -4,6 +4,7 @@ import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.core.UpdateByQueryRequest;
 import com.boyang.search.entity.KbDocOutbox;
 import com.boyang.search.mapper.KbDocOutboxMapper;
+import com.boyang.search.service.IndexAliasResolver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -131,8 +132,13 @@ public class OutboxPoller {
     private void activateInEs(KbDocOutbox outbox) throws Exception {
         String sourceName  = outbox.getSourceName();
         int    docVersion  = outbox.getDocVersion() != null ? outbox.getDocVersion() : 1;
-        String targetIndex = indexAliasResolver.normalizeWriteTarget(
-            outbox.getTargetIndex() != null ? outbox.getTargetIndex() : "kb_document_v1");
+        // 激活必须命中 chunk 实际所在的物理索引（kb_document_*_v2，未来 _v3）。
+        // outbox 存的是逻辑名（如 kb_document_law），normalizeWriteTarget 会把它原样返回，
+        // 但同名存在一个 0 条的空壳遗留具体索引（非别名，_alias/kb_document_law → 404），
+        // 会让 update_by_query 打在空壳上 0 命中、却因 conflicts=Proceed 吞成"成功激活"，
+        // chunk 永远 is_latest=false。改打读别名 kb_document（覆盖所有版本化 chunk 索引、
+        // 不含空壳遗留索引）+ metadata.source 过滤，彻底绕开该解析陷阱。
+        String targetIndex = IndexAliasResolver.DOCUMENT_READ_ALIAS;
 
         // 单次脚本切换：同一 source_name 下，新版本设为 true，其余版本设为 false。
         UpdateByQueryRequest switchLatest = new UpdateByQueryRequest.Builder()

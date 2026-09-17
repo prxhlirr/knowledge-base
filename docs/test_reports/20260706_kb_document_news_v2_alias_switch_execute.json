@@ -1,0 +1,48 @@
+{
+  "mode": "execute",
+  "source_index": "kb_document_news",
+  "target_index": "kb_document_news_v2",
+  "es_host": "http://localhost:9200",
+  "batch_size": 8,
+  "limit": 1000,
+  "sample": 3,
+  "create_target": true,
+  "switch_alias": true,
+  "read_alias": "kb_document",
+  "write_alias": "kb_document_news_write",
+  "started_at": 1783300573224,
+  "finished_at": 1783300573736,
+  "stats": {
+    "scanned": 16,
+    "dry_run_writes": 0,
+    "written": 16,
+    "failed": 0
+  },
+  "alias_actions": [
+    {
+      "remove": {
+        "index": "kb_document_news",
+        "alias": "kb_document"
+      }
+    },
+    {
+      "remove": {
+        "index": "kb_document_news",
+        "alias": "kb_document_news_write"
+      }
+    },
+    {
+      "add": {
+        "index": "kb_document_news_v2",
+        "alias": "kb_document"
+      }
+    },
+    {
+      "add": {
+        "index": "kb_document_news_v2",
+        "alias": "kb_document_news_write",
+        "is_write_index": true
+      }
+    }
+  ]
+}

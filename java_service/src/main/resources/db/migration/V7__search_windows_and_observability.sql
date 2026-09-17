@@ -33,3 +33,7 @@ ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS rerank_semaphore_re
 ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS llm_semaphore_rejected BOOLEAN DEFAULT false;
 ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS admin_bypass BOOLEAN DEFAULT false;
 ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS post_filter_denied_count INT DEFAULT 0;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS doc_search_enabled BOOLEAN DEFAULT false;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS doc_search_ms INT DEFAULT 0;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS doc_search_candidates INT DEFAULT 0;
+ALTER TABLE public.search_audit_log ADD COLUMN IF NOT EXISTS doc_search_prefilter_applied BOOLEAN DEFAULT false;

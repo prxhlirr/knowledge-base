@@ -1,0 +1,35 @@
+{
+  "kb_document_public": {
+    "settings": {
+      "index": {
+        "analysis": {
+          "analyzer": {
+            "ik_max_word": {
+              "tokenizer": "ik_max_word",
+              "type": "custom"
+            },
+            "ik_smart": {
+              "tokenizer": "ik_smart",
+              "type": "custom"
+            }
+          }
+        },
+        "creation_date": "1776213689096",
+        "number_of_replicas": "0",
+        "number_of_shards": "1",
+        "provided_name": "kb_document_public",
+        "routing": {
+          "allocation": {
+            "include": {
+              "_tier_preference": "data_content"
+            }
+          }
+        },
+        "uuid": "Q8rzFWJNRBmrLc3MRXegog",
+        "version": {
+          "created": "8060299"
+        }
+      }
+    }
+  }
+}

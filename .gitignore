@@ -126,3 +126,4 @@ frontend/.env.production
 # ═══ 离线部署相关（走独立通道发版，不进 Git）═══
 offline-pkgs/
 offline-pkgs.zip
+java_service/src/main/java/com/boyang/search/controller/DocRegisterController.java

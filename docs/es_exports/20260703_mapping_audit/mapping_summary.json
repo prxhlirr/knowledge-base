@@ -1,0 +1,708 @@
+{
+  "kb_doc_meta": {
+    "docs_count": "13",
+    "fields": {
+      "acl_tokens": {
+        "type": "keyword"
+      },
+      "content": {
+        "analyzer": "ik_max_word",
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "doc_title": {
+        "analyzer": "ik_max_word",
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "doc_vector": {
+        "type": "float"
+      },
+      "doc_version": {
+        "type": "integer"
+      },
+      "index_code": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "is_latest": {
+        "type": "boolean"
+      },
+      "owner_unit_code": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "permission_version": {
+        "type": "long"
+      },
+      "security_level": {
+        "type": "integer"
+      },
+      "source_index": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "visible_unit_codes": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      }
+    },
+    "number_of_replicas": "1",
+    "number_of_shards": "1",
+    "pri": "1",
+    "rep": "1",
+    "store_size": "339kb"
+  },
+  "kb_doc_meta_v2": {
+    "docs_count": "6",
+    "fields": {
+      "acl_tokens": {
+        "type": "keyword"
+      },
+      "content": {
+        "analyzer": "ik_max_word",
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "doc_title": {
+        "analyzer": "ik_max_word",
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "doc_vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "doc_version": {
+        "type": "integer"
+      },
+      "index_code": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "is_latest": {
+        "type": "boolean"
+      },
+      "owner_unit_code": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "permission_version": {
+        "type": "long"
+      },
+      "security_level": {
+        "type": "integer"
+      },
+      "source_index": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "title": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "visible_unit_codes": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      }
+    },
+    "number_of_replicas": "0",
+    "number_of_shards": "1",
+    "pri": "1",
+    "rep": "0",
+    "store_size": "216kb"
+  },
+  "kb_doc_search_v1": {
+    "docs_count": "22",
+    "fields": {
+      "acl_tokens": {
+        "type": "keyword"
+      },
+      "content": {
+        "analyzer": "ik_max_word",
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "doc_title": {
+        "analyzer": "ik_max_word",
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "doc_version": {
+        "type": "integer"
+      },
+      "index_code": {
+        "type": "keyword"
+      },
+      "is_latest": {
+        "type": "boolean"
+      },
+      "owner_unit_code": {
+        "type": "keyword"
+      },
+      "permission_version": {
+        "type": "long"
+      },
+      "publish_time": {
+        "type": "date"
+      },
+      "security_level": {
+        "type": "integer"
+      },
+      "source_index": {
+        "type": "keyword"
+      },
+      "tags": {
+        "type": "keyword"
+      },
+      "title": {
+        "analyzer": "ik_max_word",
+        "fields": {
+          "keyword": "keyword",
+          "ngram": "text"
+        },
+        "search_analyzer": "ik_smart",
+        "type": "text"
+      },
+      "vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "number_of_replicas": "0",
+    "number_of_shards": "1",
+    "pri": "1",
+    "rep": "0",
+    "store_size": "402.3kb"
+  },
+  "kb_document_law": {
+    "docs_count": "0",
+    "fields": {
+      "acl_tokens": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "content": {
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "type": "text"
+      },
+      "display_content": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "index_code": {
+        "type": "keyword"
+      },
+      "metadata": {
+        "metadata_fields": {
+          "acl_tokens": "keyword",
+          "doc_version": "integer",
+          "index_code": "text",
+          "is_latest": "boolean",
+          "owner_unit_code": "text",
+          "permission_version": "long",
+          "source_index": "text",
+          "visible_unit_codes": "text"
+        },
+        "type": null
+      },
+      "owner_unit_code": {
+        "type": "keyword"
+      },
+      "permission_version": {
+        "type": "long"
+      },
+      "source_index": {
+        "type": "keyword"
+      },
+      "sparse_vector": {
+        "type": "rank_features"
+      },
+      "vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "number_of_replicas": "0",
+    "number_of_shards": "1",
+    "pri": "1",
+    "rep": "0",
+    "store_size": "139.7kb"
+  },
+  "kb_document_news": {
+    "docs_count": "16",
+    "fields": {
+      "acl_tokens": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "content": {
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "type": "text"
+      },
+      "display_content": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "index_code": {
+        "type": "keyword"
+      },
+      "metadata": {
+        "metadata_fields": {
+          "acl_tokens": "keyword",
+          "doc_version": "integer",
+          "index_code": "text",
+          "is_latest": "boolean",
+          "owner_unit_code": "text",
+          "permission_version": "long",
+          "source_index": "text",
+          "visible_unit_codes": "text"
+        },
+        "type": null
+      },
+      "owner_unit_code": {
+        "type": "keyword"
+      },
+      "permission_version": {
+        "type": "long"
+      },
+      "source_index": {
+        "type": "keyword"
+      },
+      "sparse_vector": {
+        "type": "rank_features"
+      },
+      "vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "number_of_replicas": "0",
+    "number_of_shards": "1",
+    "pri": "1",
+    "rep": "0",
+    "store_size": "394.5kb"
+  },
+  "kb_document_notice": {
+    "docs_count": "0",
+    "fields": {
+      "content": {
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "type": "text"
+      },
+      "index_code": {
+        "type": "keyword"
+      },
+      "metadata": {
+        "metadata_fields": {
+          "acl_tokens": "keyword",
+          "doc_version": "integer",
+          "is_latest": "boolean"
+        },
+        "type": null
+      },
+      "owner_unit_code": {
+        "type": "keyword"
+      },
+      "permission_version": {
+        "type": "long"
+      },
+      "source_index": {
+        "type": "keyword"
+      },
+      "sparse_vector": {
+        "type": "rank_features"
+      },
+      "vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "number_of_replicas": "0",
+    "number_of_shards": "1",
+    "pri": "1",
+    "rep": "0",
+    "store_size": "225b"
+  },
+  "kb_document_official": {
+    "docs_count": "669",
+    "fields": {
+      "acl_tokens": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "content": {
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "type": "text"
+      },
+      "display_content": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "index_code": {
+        "type": "keyword"
+      },
+      "metadata": {
+        "metadata_fields": {
+          "acl_tokens": "keyword",
+          "doc_version": "integer",
+          "is_latest": "boolean"
+        },
+        "type": null
+      },
+      "owner_unit_code": {
+        "type": "keyword"
+      },
+      "permission_version": {
+        "type": "long"
+      },
+      "source_index": {
+        "type": "keyword"
+      },
+      "sparse_vector": {
+        "type": "rank_features"
+      },
+      "vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "number_of_replicas": "0",
+    "number_of_shards": "1",
+    "pri": "1",
+    "rep": "0",
+    "store_size": "16mb"
+  },
+  "kb_document_public": {
+    "docs_count": "22",
+    "fields": {
+      "acl_tokens": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "content": {
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "type": "text"
+      },
+      "display_content": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "index_code": {
+        "type": "keyword"
+      },
+      "metadata": {
+        "metadata_fields": {
+          "acl_tokens": "keyword",
+          "doc_version": "integer",
+          "is_latest": "boolean"
+        },
+        "type": null
+      },
+      "owner_unit_code": {
+        "type": "keyword"
+      },
+      "permission_version": {
+        "type": "long"
+      },
+      "source_index": {
+        "type": "keyword"
+      },
+      "sparse_vector": {
+        "type": "rank_features"
+      },
+      "vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "number_of_replicas": "0",
+    "number_of_shards": "1",
+    "pri": "1",
+    "rep": "0",
+    "store_size": "515.9kb"
+  },
+  "kb_document_v1": {
+    "docs_count": "0",
+    "fields": {
+      "content": {
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "type": "text"
+      },
+      "index_code": {
+        "type": "keyword"
+      },
+      "metadata": {
+        "metadata_fields": {
+          "acl_tokens": "keyword",
+          "doc_version": "integer",
+          "is_latest": "boolean"
+        },
+        "type": null
+      },
+      "owner_unit_code": {
+        "type": "keyword"
+      },
+      "permission_version": {
+        "type": "long"
+      },
+      "source_index": {
+        "type": "keyword"
+      },
+      "sparse_vector": {
+        "type": "rank_features"
+      },
+      "vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "number_of_replicas": "0",
+    "number_of_shards": "1",
+    "pri": "1",
+    "rep": "0",
+    "store_size": "225b"
+  },
+  "kb_qa_pairs": {
+    "docs_count": "444",
+    "fields": {
+      "acl_tokens": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "content": {
+        "analyzer": "ik_max_word",
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "doc_title": {
+        "analyzer": "ik_max_word",
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "doc_version": {
+        "type": "integer"
+      },
+      "index_code": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "is_latest": {
+        "type": "boolean"
+      },
+      "owner_unit_code": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "permission_version": {
+        "type": "long"
+      },
+      "question_vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "security_level": {
+        "type": "integer"
+      },
+      "source_index": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "visible_unit_codes": {
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      }
+    },
+    "number_of_replicas": "1",
+    "number_of_shards": "1",
+    "pri": "1",
+    "rep": "1",
+    "store_size": "9.1mb"
+  },
+  "kb_qa_pairs_v2": {
+    "docs_count": "444",
+    "fields": {
+      "acl_tokens": {
+        "type": "keyword"
+      },
+      "content": {
+        "analyzer": "ik_max_word",
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "doc_title": {
+        "analyzer": "ik_max_word",
+        "fields": {
+          "keyword": "keyword"
+        },
+        "type": "text"
+      },
+      "doc_version": {
+        "type": "integer"
+      },
+      "index_code": {
+        "type": "keyword"
+      },
+      "is_latest": {
+        "type": "boolean"
+      },
+      "owner_unit_code": {
+        "type": "keyword"
+      },
+      "permission_version": {
+        "type": "long"
+      },
+      "question_vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "security_level": {
+        "type": "integer"
+      },
+      "source_index": {
+        "type": "keyword"
+      },
+      "vector": {
+        "dims": 1024,
+        "index": true,
+        "similarity": "cosine",
+        "type": "dense_vector"
+      },
+      "visible_unit_codes": {
+        "type": "keyword"
+      }
+    },
+    "number_of_replicas": "1",
+    "number_of_shards": "1",
+    "pri": "1",
+    "rep": "1",
+    "store_size": "9.1mb"
+  }
+}

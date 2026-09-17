@@ -14,8 +14,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 文档注册中心 Service。
@@ -34,12 +38,23 @@ public class KbDocRegistryService {
     private final KbDocRegistryMapper registryMapper;
     /** [P0 #11] 注入 ES 客户端，deleteDoc() 删除时同步将文档 chunk is_latest 置 false */
     private final ElasticsearchClient esClient;
+    private final DeptTreeService deptTreeService;
+    private final DocAclProjectionService docAclProjectionService;
+    private final KbDocAclSubjectService docAclSubjectService;
 
     @Value("${editor.similarity.meta-write-index:kb_doc_meta_write}")
     private String docMetaWriteIndex;
 
     @Value("${search.doc-search.write-index:${KB_DOC_SEARCH_WRITE_ALIAS:kb_doc_search_write}}")
     private String docSearchWriteIndex;
+
+    /**
+     * QA 写别名（-> kb_qa_pairs_v2）。
+     * 文档激活/删除时的 QA is_latest 翻转必须走写别名，打到 v2 新鲜数据；
+     * 硬编码旧物理名 kb_qa_pairs 会命中已降级的旧索引，导致 v2 QA 永不激活/不被清理。
+     */
+    @Value("${search.qa.write-index:${KB_QA_WRITE_ALIAS:kb_qa_write}}")
+    private String qaWriteIndex;
 
     /**
      * 注册一个新版本文档。
@@ -109,7 +124,7 @@ public class KbDocRegistryService {
         // 方案B补充：执行 backfill_qa_doc_version.py 后此 null 分支理论上不再触发
         try {
             UpdateByQueryRequest qaVersionReq = UpdateByQueryRequest.of(r -> r
-                    .index("kb_qa_pairs")
+                    .index(qaWriteIndex)
                     .query(q -> q.term(t -> t.field("source").value(safeSourceName)))
                     .script(s -> s.inline(i -> i
                             .source(
@@ -247,7 +262,7 @@ public class KbDocRegistryService {
         // 容错：ES 失败不回滚 MySQL，与 Step2 保持一致，记录 warn 可补偿
         try {
             UpdateByQueryRequest qaReq = UpdateByQueryRequest.of(r -> r
-                    .index("kb_qa_pairs")
+                    .index(qaWriteIndex)
                     .query(q -> q.term(t -> t.field("source").value(sourceName)))
                     .script(s -> s.inline(i -> i
                             .source("ctx._source.is_latest = false")
@@ -296,13 +311,22 @@ public class KbDocRegistryService {
     }
 
     /**
-     * 更新文档元数据（仅限不影响 ES 向量内容的字段）。
-     * 支持字段：tags / docNumber / unit / visibility / deptCode / uploaderName。
+     * 更新文档元数据。
+     * 业务功能：更新文档管理页可编辑元数据，并在权限字段变化时同步重建 ACL 事实表与 ES 投影。
+     * 关键流程：
+     * 1. 普通元数据仅更新 MySQL registry。
+     * 2. visibility/deptCode 属于权限字段，更新后必须重建初始 ACL subject。
+     * 3. 基于当前所有 active subject 覆盖同步 acl_tokens，并同步单位可见链。
+     * 设计原因：MySQL 是权限权威来源；ES 只是召回加速投影。若只改 MySQL，
+     *          检索前置过滤会继续使用旧 acl_tokens/visible_unit_codes，产生漏召回或误召回。
      */
+    @Transactional(rollbackFor = Exception.class)
     public boolean updateMeta(Long id, Map<String, String> fields) {
         KbDocRegistry entry = registryMapper.selectById(id);
         if (entry == null)
             return false;
+
+        boolean permissionFieldsTouched = fields.containsKey("visibility") || fields.containsKey("deptCode");
 
         if (fields.containsKey("tags"))
             entry.setTags(fields.get("tags"));
@@ -320,7 +344,83 @@ public class KbDocRegistryService {
         entry.setUpdatedAt(OffsetDateTime.now());
         registryMapper.updateById(entry);
         log.info("[DocRegistry] 元数据更新 id={} fields={}", id, fields.keySet());
+
+        if (permissionFieldsTouched) {
+            syncPermissionProjectionAfterMetaUpdate(entry);
+        }
         return true;
+    }
+
+    /**
+     * 业务功能：元数据编辑触碰权限字段后，统一同步 ACL 事实表和 ES 权限投影。
+     * 关键流程：重建 INGEST_INIT 初始授权 → 汇总当前 active ACL token → 覆盖写入 ES →
+     *          同步单位归属字段。
+     * 设计原因：visibility/deptCode 改变会让文档可见主体全集发生变化，不能用单 token 增量修补。
+     */
+    private void syncPermissionProjectionAfterMetaUpdate(KbDocRegistry entry) {
+        String operator = entry.getUploaderId() != null && !entry.getUploaderId().trim().isEmpty()
+                ? entry.getUploaderId().trim()
+                : "system";
+        docAclSubjectService.replaceInitialSubjects(entry, Collections.emptyList(), Collections.emptyList(), operator);
+
+        List<String> aclTokens = buildAclTokensFromActiveSubjects(entry.getSourceName());
+        docAclProjectionService.syncAclTokensProjection(entry.getTargetIndex(), entry.getSourceName(), aclTokens);
+
+        UnitProjection unitProjection = buildUnitProjection(entry.getDeptCode());
+        docAclProjectionService.syncUnitProjection(
+                entry.getTargetIndex(),
+                entry.getSourceName(),
+                unitProjection.ownerUnitCode,
+                unitProjection.visibleUnitCodes,
+                System.currentTimeMillis());
+    }
+
+    /**
+     * 业务功能：从 ACL subject 事实表生成 ES 前置过滤使用的 token 集合。
+     * 关键流程：只采纳 active + ALLOW + VIEW 记录，并保持插入顺序去重。
+     * 设计原因：运行期授权可能与初始 visibility 授权并存，ES 覆盖投影必须使用完整事实表。
+     */
+    private List<String> buildAclTokensFromActiveSubjects(String sourceName) {
+        List<com.boyang.search.entity.KbDocAclSubject> subjects = docAclSubjectService.listActive(sourceName);
+        Set<String> tokens = new LinkedHashSet<>();
+        for (com.boyang.search.entity.KbDocAclSubject subject : subjects) {
+            if (subject == null || !"ALLOW".equalsIgnoreCase(subject.getEffect())
+                    || !"VIEW".equalsIgnoreCase(subject.getScope())) {
+                continue;
+            }
+            String token = docAclSubjectService.toAclToken(subject.getSubjectType(), subject.getSubjectValue());
+            if (token != null && !token.trim().isEmpty()) {
+                tokens.add(token);
+            }
+        }
+        return new ArrayList<>(tokens);
+    }
+
+    /**
+     * 业务功能：构造文档单位权限投影。
+     * 关键流程：空 deptCode 归入 global；非空 deptCode 使用 DeptTreeService 生成自身到祖先链。
+     * 设计原因：检索前置过滤和后置鉴权都以“文档归属单位 + 可见单位链”为基础，必须与入库侧口径一致。
+     */
+    private UnitProjection buildUnitProjection(String deptCode) {
+        if (deptCode == null || deptCode.trim().isEmpty()) {
+            return new UnitProjection("global", Collections.singletonList("global"));
+        }
+        String ownerUnitCode = DeptTreeService.normalizeDeptCode(deptCode);
+        List<String> visibleUnitCodes = deptTreeService.buildAclChain(ownerUnitCode);
+        if (visibleUnitCodes == null || visibleUnitCodes.isEmpty()) {
+            visibleUnitCodes = Collections.singletonList(ownerUnitCode);
+        }
+        return new UnitProjection(ownerUnitCode, visibleUnitCodes);
+    }
+
+    private static class UnitProjection {
+        private final String ownerUnitCode;
+        private final List<String> visibleUnitCodes;
+
+        private UnitProjection(String ownerUnitCode, List<String> visibleUnitCodes) {
+            this.ownerUnitCode = ownerUnitCode;
+            this.visibleUnitCodes = visibleUnitCodes;
+        }
     }
 
     /**

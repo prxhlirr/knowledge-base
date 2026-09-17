@@ -1,0 +1,3 @@
+@echo off
+cd /d E:\project\AI\knowledge-base\java_service
+mvn spring-boot:run "-Dspring-boot.run.arguments=--server.port=18080 --elasticsearch.host=127.0.0.1 --elasticsearch.port=9200 --elasticsearch.username= --elasticsearch.password= --ai.service.host=http://127.0.0.1:8001 --qa.answer.ai-service-url=http://127.0.0.1:8001 --spring.redis.host=127.0.0.1 --spring.redis.port=6379 --xxl.job.enabled=false --jwt.dev-mode=false --search.trust-gateway-headers=true --kb.security.god-mode=false --kb.search.legacy-missing-permission-allow=false --kb.search.doc-search-missing-source-index-allow=false" > scratch\strict_http_java.out.log 2> scratch\strict_http_java.err.log

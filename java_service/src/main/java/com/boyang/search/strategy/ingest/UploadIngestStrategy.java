@@ -54,11 +54,21 @@ public class UploadIngestStrategy extends AbstractIngestStrategy {
             return result;
         }
 
-        for (MultipartFile file : files) {
-            // 核心流程：直接通过 file::getInputStream 传递流，由基类进行大小校验、魔数判断、Hash去重与分级存储
-            // 这种设计遵循防线上移原则，精简了子类的重复代码，且避免了提前加载全部字节造成的额外内存开销
+        // [竞态修复] 字节已在请求线程内由 DocIngestService.materializeUploadBytes() 固化到堆内 byte[]。
+        // 这里只读取堆内字节构造 ByteArrayInputStream，不再触碰 file.getInputStream() ——
+        // 后者背后是已被 Tomcat 清理的请求级临时文件，异步读取会随机失败。
+        byte[][] bytes = req.getUploadFileBytes();
+        for (int i = 0; i < files.length; i++) {
+            final MultipartFile file = files[i];
+            final byte[] data = (bytes != null && i < bytes.length) ? bytes[i] : null;
+            if (data == null) {
+                synchronized (batch) { batch.setErrorCount(batch.getErrorCount() + 1); }
+                log.error("[DocIngest] 上传字节缺失跳过 name={}", file.getOriginalFilename());
+                continue;
+            }
+            // 核心流程：以堆内字节构造流，交由基类进行大小校验、魔数判断、Hash去重与分级存储
             Map<String, String> info = processFile(
-                    file::getInputStream,
+                    () -> new ByteArrayInputStream(data),
                     file.getOriginalFilename(), req, batch);
             if (info != null) {
                 result.add(info);

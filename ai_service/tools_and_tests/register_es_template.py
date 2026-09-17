@@ -1,17 +1,53 @@
 import os
 from elasticsearch import Elasticsearch
 
-# 连接 ES
+
+def env_int(name: str, default: int, min_value: int = 0) -> int:
+    """
+    业务功能：读取模板注册测试工具的整数配置。
+    关键流程：测试工具也可能连到真实离线 ES，分片、副本和 HNSW 参数必须显式可配。
+    """
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        print(f"[Template] env {name}={raw!r} is not an integer, fallback to {default}")
+        return default
+    if value < min_value:
+        print(f"[Template] env {name}={value} is lower than {min_value}, fallback to {default}")
+        return default
+    return value
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    """
+    业务功能：读取模板覆盖开关。
+    关键流程：删除 index template 会影响后续新建索引，测试工具默认也不能执行破坏性覆盖。
+    """
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 es_host = os.environ.get("ES_HOST", "http://localhost:9200")
 es = Elasticsearch(hosts=[es_host])
 
-template_name = "kb_template"
+template_name = os.getenv("KB_LEGACY_TEMPLATE_NAME", "kb_legacy_template")
+index_pattern = os.getenv("KB_LEGACY_TEMPLATE_PATTERN", "kb_legacy_*")
+template_priority = env_int("KB_LEGACY_TEMPLATE_PRIORITY", 10, min_value=0)
+overwrite_template = env_bool("KB_LEGACY_TEMPLATE_OVERWRITE", False)
 
-# 定义 Index Template (匹配模式为 kb_*)
-# 这里在 metadata 映射中预定义 data_source, owner_dept_id, visible_depts
 template_body = {
-    "index_patterns": ["kb_*"],
+    "index_patterns": [index_pattern],
+    "priority": template_priority,
     "template": {
+        "settings": {
+            "number_of_shards": env_int("KB_LEGACY_TEMPLATE_SHARDS", 1, min_value=1),
+            "number_of_replicas": env_int("KB_LEGACY_TEMPLATE_REPLICAS", 0, min_value=0),
+        },
         "mappings": {
             "properties": {
                 "content": {
@@ -20,18 +56,18 @@ template_body = {
                     "fields": {
                         "keyword": {
                             "type": "keyword",
-                            "ignore_above": 256
+                            "ignore_above": 256,
                         }
-                    }
+                    },
                 },
                 "doc_title": {
                     "type": "text",
                     "analyzer": "ik_max_word",
                     "fields": {
                         "keyword": {
-                            "type": "keyword"
+                            "type": "keyword",
                         }
-                    }
+                    },
                 },
                 "vector": {
                     "type": "dense_vector",
@@ -40,33 +76,31 @@ template_body = {
                     "similarity": "cosine",
                     "index_options": {
                         "type": "hnsw",
-                        "m": 16,
-                        "ef_construction": 100
-                    }
+                        "m": env_int("KB_LEGACY_TEMPLATE_HNSW_M", 16, min_value=1),
+                        "ef_construction": env_int("KB_LEGACY_TEMPLATE_HNSW_EF_CONSTRUCTION", 100, min_value=1),
+                    },
                 },
-                # --------- 统一元数据字段规范 ---------
-                "source": { "type": "keyword" },
-                "chunk_id": { "type": "integer" },
-                "is_latest": { "type": "boolean" },
-                "data_source": { "type": "keyword" },
-                "owner_dept_id": { "type": "keyword" },
-                "visible_depts": { "type": "keyword" }
+                "source": {"type": "keyword"},
+                "chunk_id": {"type": "integer"},
+                "is_latest": {"type": "boolean"},
+                "data_source": {"type": "keyword"},
+                "owner_dept_id": {"type": "keyword"},
+                "visible_depts": {"type": "keyword"},
             }
-        }
-    }
+        },
+    },
 }
 
 try:
-    if es.indices.exists_index_template(name=template_name):
+    if overwrite_template and es.indices.exists_index_template(name=template_name):
         es.indices.delete_index_template(name=template_name)
-    
+
     es.indices.put_index_template(
         name=template_name,
-        index_patterns=["kb_*"],
-        template={
-            "mappings": template_body["template"]["mappings"]
-        }
+        index_patterns=[index_pattern],
+        priority=template_priority,
+        template=template_body["template"],
     )
-    print(f"✅ 成功注册 Index Template: '{template_name}'，将匹配所有 'kb_*' 索引。")
+    print(f"[Template] registered {template_name}, pattern={index_pattern}, priority={template_priority}")
 except Exception as e:
-    print(f"❌ 注册失败: {e}")
+    print(f"[Template] register failed: {e}")

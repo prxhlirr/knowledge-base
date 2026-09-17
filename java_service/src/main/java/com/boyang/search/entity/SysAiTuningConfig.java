@@ -12,6 +12,9 @@ import java.time.LocalDateTime;
 @TableName("sys_ai_tuning_config")
 public class SysAiTuningConfig {
 
+    private static final int DEFAULT_KNN_NUM_CANDIDATES = 1000;
+    private static final int MIN_EFFECTIVE_KNN_NUM_CANDIDATES = 1000;
+
     @TableId(type = IdType.AUTO)
     private Integer id;
 
@@ -211,7 +214,19 @@ public class SysAiTuningConfig {
      */
     private Integer knnNumCandidates;
 
-    public Integer getKnnNumCandidates() { return knnNumCandidates != null ? knnNumCandidates : 500; }
+    public Integer getKnnNumCandidates() { return knnNumCandidates != null ? knnNumCandidates : DEFAULT_KNN_NUM_CANDIDATES; }
+
+    /**
+     * 业务功能：计算主 chunk KNN 检索实际使用的 HNSW 候选遍历数。
+     * 关键流程：同时满足 ES 约束、亿级召回下限和数据库热配置，避免历史默认 500 在大索引中造成召回塌方。
+     *
+     * @param kVal 本次 KNN 请求的返回窗口
+     * @return 实际写入 ES numCandidates 的候选遍历数
+     */
+    public int resolveKnnNumCandidates(int kVal) {
+        int configured = getKnnNumCandidates() != null ? getKnnNumCandidates() : DEFAULT_KNN_NUM_CANDIDATES;
+        return Math.max(Math.max(configured, Math.max(kVal, 1) * 2), MIN_EFFECTIVE_KNN_NUM_CANDIDATES);
+    }
 
     /**
      * Out-of-Corpus 语料外截断阈值（Reranker 已运行时使用）。

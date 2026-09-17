@@ -23,12 +23,144 @@ QA_INDEX_WRITE_ALIAS = "kb_qa_write"  # 所有写入（bulk index）走此别名
 QA_INDEX_READ_ALIAS  = "kb_qa_read"   # 所有读查询（KNN、match）走此别名
 
 
+def _env_int(name: str, default: int, min_value: int = 0) -> int:
+    """
+    业务功能：读取 ES 索引容量相关整数配置。
+    关键流程：环境变量缺失或非法时回退默认值，避免错误配置生成不可用索引模板。
+    """
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        print(f"[ESSetup] env {name}={raw!r} is not an integer, fallback to {default}")
+        return default
+    if value < min_value:
+        print(f"[ESSetup] env {name}={value} is lower than {min_value}, fallback to {default}")
+        return default
+    return value
+
+
+def document_index_settings() -> dict:
+    """
+    业务功能：生成 kb_document_* 业务 chunk 索引 settings。
+    关键流程：默认保持单节点兼容；生产扩容时通过环境变量创建新索引模板，不原地修改历史索引。
+    """
+    return {
+        "number_of_shards": _env_int("KB_DOCUMENT_SHARDS", 1, min_value=1),
+        "number_of_replicas": _env_int("KB_DOCUMENT_REPLICAS", 0, min_value=0),
+    }
+
+
+def doc_meta_index_settings() -> dict:
+    """
+    业务功能：生成 kb_doc_meta 文档级索引 settings。
+    关键流程：独立于 chunk 索引配置，便于后续将文档级检索与 chunk 检索分开扩容。
+    """
+    return {
+        "number_of_shards": _env_int("KB_DOC_META_SHARDS", 1, min_value=1),
+        "number_of_replicas": _env_int("KB_DOC_META_REPLICAS", 0, min_value=0),
+    }
+
+
+def doc_search_index_settings() -> dict:
+    """
+    业务功能：生成 kb_doc_search 文档级预筛索引 settings。
+    关键流程：保留 ngram analyzer 配置，同时把分片、副本和 ngram 差值配置集中管理。
+    """
+    return {
+        "number_of_shards": _env_int("KB_DOC_SEARCH_SHARDS", 1, min_value=1),
+        "number_of_replicas": _env_int("KB_DOC_SEARCH_REPLICAS", 0, min_value=0),
+        "max_ngram_diff": _env_int("KB_DOC_SEARCH_MAX_NGRAM_DIFF", 6, min_value=1),
+        "analysis": {
+            "tokenizer": {
+                "doc_ngram_tokenizer": {
+                    "type": "ngram",
+                    "min_gram": 2,
+                    "max_gram": 8,
+                }
+            },
+            "analyzer": {
+                "ik_smart": {"type": "custom", "tokenizer": "ik_smart"},
+                "ik_max_word": {"type": "custom", "tokenizer": "ik_max_word"},
+                "doc_ngram": {
+                    "type": "custom",
+                    "tokenizer": "doc_ngram_tokenizer",
+                    "filter": ["lowercase"],
+                },
+            },
+        },
+    }
+
+
+def qa_index_settings() -> dict:
+    """
+    业务功能：生成 kb_qa_pairs 问答索引 settings。
+    关键流程：QA 索引同样承载向量检索，必须和 chunk/doc 索引一样通过环境变量控制分片与副本，
+              避免生产环境退回 ES 默认副本或单分片。
+    """
+    return {
+        "number_of_shards": _env_int("KB_QA_SHARDS", 1, min_value=1),
+        "number_of_replicas": _env_int("KB_QA_REPLICAS", 0, min_value=0),
+    }
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """
+    业务功能：读取布尔型开关配置。
+    关键流程：生产保护需要显式开关绕过，统一解析能避免大小写和取值差异造成误判。
+    """
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _is_production_env() -> bool:
+    """
+    业务功能：判断当前是否处于生产部署上下文。
+    关键流程：兼容 Spring、Python 和通用容器环境变量，只要任一 profile 标记为 prod/production 即启用保护。
+    """
+    names = ["APP_ENV", "ENV", "ENVIRONMENT", "PYTHON_ENV", "SPRING_PROFILES_ACTIVE"]
+    values = ",".join(os.getenv(name, "") for name in names).lower()
+    tokens = {item.strip() for part in values.split(",") for item in part.split(";")}
+    return bool(tokens.intersection({"prod", "production"}))
+
+
+def validate_production_index_settings() -> None:
+    """
+    业务功能：在生产初始化索引前校验分片和副本配置是否明显不适合生产。
+    关键流程：默认开发配置允许单节点运行；生产环境必须显式配置多分片和副本，
+              若确实是离线单节点演练，需要通过 ALLOW_SINGLE_NODE_ES=true 明确承担风险。
+    """
+    if not _is_production_env() or _env_flag("ALLOW_SINGLE_NODE_ES", False):
+        return
+
+    checks = [
+        ("KB_DOCUMENT", document_index_settings(), 2, 1),
+        ("KB_DOC_META", doc_meta_index_settings(), 1, 1),
+        ("KB_DOC_SEARCH", doc_search_index_settings(), 1, 1),
+        ("KB_QA", qa_index_settings(), 1, 1),
+    ]
+    violations = []
+    for name, settings, min_shards, min_replicas in checks:
+        if settings["number_of_shards"] < min_shards:
+            violations.append(f"{name}_SHARDS={settings['number_of_shards']} < {min_shards}")
+        if settings["number_of_replicas"] < min_replicas:
+            violations.append(f"{name}_REPLICAS={settings['number_of_replicas']} < {min_replicas}")
+
+    if violations:
+        raise RuntimeError(
+            "[ESSetup] 生产环境索引容量配置不安全，拒绝 init 创建索引："
+            + "; ".join(violations)
+            + "。如确认为离线单节点演练，请显式设置 ALLOW_SINGLE_NODE_ES=true。"
+        )
+
+
 def doc_meta_index_mapping() -> dict:
     return {
-        "settings": {
-            "number_of_shards": 1,
-            "number_of_replicas": 0,
-        },
+        "settings": doc_meta_index_settings(),
         "mappings": {
             "properties": {
                 "doc_id": {"type": "keyword"},
@@ -50,13 +182,54 @@ def doc_meta_index_mapping() -> dict:
                 "acl_tokens": {"type": "keyword"},
                 "visibility": {"type": "keyword"},
                 "owner_dept_id": {"type": "keyword"},
+                "source_index": {"type": "keyword"},
+                "index_code": {"type": "keyword"},
+                "owner_unit_code": {"type": "keyword"},
+                "visible_unit_codes": {"type": "keyword"},
+                "permission_version": {"type": "long"},
                 "updated_at": {"type": "date", "format": "epoch_millis"},
                 "doc_vector": {
                     "type": "dense_vector",
                     "dims": 1024,
                     "index": True,
                     "similarity": "cosine",
+                    "index_options": {"type": "hnsw", "m": 48, "ef_construction": 400},
                 },
+            }
+        },
+    }
+
+
+def qa_index_mapping() -> dict:
+    """
+    业务功能：生成 Q&A 索引的完整 settings + mappings。
+    关键流程：把 QA 向量字段、权限字段和容量 settings 放在同一个入口，
+              后续迁移脚本和 init 创建流程才能共享同一份生产约束。
+    """
+    return {
+        "settings": qa_index_settings(),
+        "mappings": {
+            "properties": {
+                "question": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+                "question_vector": {
+                    "type": "dense_vector",
+                    "dims": 1024,
+                    "index": True,
+                    "similarity": "cosine",
+                    "index_options": {"type": "hnsw", "m": 48, "ef_construction": 400},
+                },
+                "answer_content": {"type": "text"},
+                "answer_chunk_id": {"type": "keyword"},
+                "section_path": {"type": "keyword"},
+                "source": {"type": "keyword"},
+                "acl_tokens": {"type": "keyword"},
+                "source_index": {"type": "keyword"},
+                "index_code": {"type": "keyword"},
+                "owner_unit_code": {"type": "keyword"},
+                "visible_unit_codes": {"type": "keyword"},
+                "permission_version": {"type": "long"},
+                "doc_version": {"type": "integer"},
+                "is_latest": {"type": "boolean"},
             }
         },
     }
@@ -64,33 +237,7 @@ def doc_meta_index_mapping() -> dict:
 
 def doc_search_index_mapping() -> dict:
     return {
-        "settings": {
-            "number_of_shards": int(os.getenv("KB_DOC_SEARCH_SHARDS", "1")),
-            "number_of_replicas": int(os.getenv("KB_DOC_SEARCH_REPLICAS", "0")),
-            # ES 默认限制 max_ngram_diff <= 1，但 doc_ngram_tokenizer 使用 min=2 max=8（diff=6）
-            "max_ngram_diff": int(os.getenv("KB_DOC_SEARCH_MAX_NGRAM_DIFF", "6")),
-            "analysis": {
-                "tokenizer": {
-                    "doc_ngram_tokenizer": {
-                        "type": "ngram",
-                        "min_gram": 2,
-                        "max_gram": 8,
-                        # 不指定 token_chars，让 ngram tokenizer 处理所有字符类型（包括 CJK 汉字）。
-                        # 原配置 ["letter", "digit"] 排除了中文字符（Unicode Lo 类别），
-                        # 导致中文文件名/文号的 .ngram 子字段产生零 token，ngram 子串匹配完全失效。
-                    }
-                },
-                "analyzer": {
-                    "ik_smart": {"type": "custom", "tokenizer": "ik_smart"},
-                    "ik_max_word": {"type": "custom", "tokenizer": "ik_max_word"},
-                    "doc_ngram": {
-                        "type": "custom",
-                        "tokenizer": "doc_ngram_tokenizer",
-                        "filter": ["lowercase"],
-                    },
-                },
-            },
-        },
+        "settings": doc_search_index_settings(),
         "mappings": {
             "dynamic": "strict",
             "properties": {
@@ -134,12 +281,31 @@ def doc_search_index_mapping() -> dict:
                 "acl_tokens": {"type": "keyword"},
                 "visibility": {"type": "keyword"},
                 "owner_dept_id": {"type": "keyword"},
+                "source_index": {"type": "keyword"},
+                "index_code": {"type": "keyword"},
+                "owner_unit_code": {"type": "keyword"},
+                "visible_unit_codes": {"type": "keyword"},
+                "permission_version": {"type": "long"},
                 "publish_time": {"type": "date", "format": "yyyy-MM-dd||epoch_millis"},
                 "chunk_count": {"type": "integer"},
                 "updated_at": {"type": "date", "format": "epoch_millis"},
             },
         },
     }
+
+
+def _alias_targets(es: Elasticsearch, alias: str) -> list:
+    """
+    业务功能：返回某别名当前指向的物理索引列表。
+    关键流程：别名不存在或查询失败时返回空列表；用于 safe 模式索引校验和 init 模式幂等判断，
+              让校验在“旧物理索引已被清理、流量已切到 v2”的迁移后状态依然成立，
+              也避免 init 在清理后重建旧索引造成迁移静默回滚。
+    """
+    try:
+        refs = es.indices.get_alias(name=alias)
+    except Exception:
+        return []
+    return list((refs or {}).keys())
 
 
 class ESSetup:
@@ -168,6 +334,7 @@ class ESSetup:
         if mode == "safe":
             self._verify_only()
         elif mode == "init":
+            validate_production_index_settings()
             # [Fix] 必须先注册 Template，确保后续动态创建的路由分区索引能继承结构
             self._ensure_template()
             self._ensure_index()
@@ -219,11 +386,18 @@ class ESSetup:
         if not active_indices:
             active_indices = {INDEX_NAME}
 
-        # 2. 固定追加 QA 索引（不在路由表中，单独管理）
-        active_indices.add(QA_INDEX_NAME)
+        # 2. QA 索引不在路由表中，单独按读别名校验（见第 4 步），此处不再硬编码物理名，
+        #    以兼容“已迁移到 kb_qa_pairs_v2 且旧 kb_qa_pairs 已清理”的状态。
 
-        # 3. 逐一校验索引是否存在
-        missing = [idx for idx in active_indices if not self.es.indices.exists(index=idx)]
+        # 3. 逐一校验业务索引是否存在
+        #    容错：物理索引可能已在迁移后被清理，只要其 {idx}_write 别名仍指向 v2，视为存在。
+        missing = []
+        for idx in active_indices:
+            if self.es.indices.exists(index=idx):
+                continue
+            if _alias_targets(self.es, f"{idx}_write"):
+                continue
+            missing.append(idx)
         if missing:
             raise RuntimeError(
                 f"[ESSetup] ❌ 以下索引在 ES 中不存在，服务拒绝启动！\n"
@@ -231,23 +405,33 @@ class ESSetup:
                 f"  解决方案: 以 ES_SETUP_MODE=init 运行 scripts/es_init.py 创建缺失索引"
             )
 
-        # 4. 校验 kb_qa_pairs.question_vector 字段类型（防止 ES 动态推断污染）
+        # 4. 校验 QA 索引（按读别名解析物理索引，兼容已迁移到 kb_qa_pairs_v2 的状态）
+        qa_physicals = _alias_targets(self.es, QA_INDEX_READ_ALIAS)
+        if not qa_physicals and self.es.indices.exists(index=QA_INDEX_NAME):
+            qa_physicals = [QA_INDEX_NAME]  # 未迁移的旧环境兜底
+        if not qa_physicals:
+            raise RuntimeError(
+                f"[ESSetup] ❌ QA 索引不可用：读别名 {QA_INDEX_READ_ALIAS} 未解析到任何物理索引，"
+                f"且旧索引 {QA_INDEX_NAME} 也不存在，服务拒绝启动！\n"
+                f"  解决方案: 以 ES_SETUP_MODE=init 运行 scripts/es_init.py 创建 QA 索引并注册读写别名"
+            )
+        qa_check_index = qa_physicals[0]
         try:
-            mapping = self.es.indices.get_mapping(index=QA_INDEX_NAME)
+            mapping = self.es.indices.get_mapping(index=qa_check_index)
             qv_type = (
-                mapping.get(QA_INDEX_NAME, {})
+                mapping.get(qa_check_index, {})
                 .get("mappings", {}).get("properties", {})
                 .get("question_vector", {}).get("type", "")
             )
             if qv_type and qv_type != "dense_vector":
                 raise RuntimeError(
-                    f"[ESSetup] ❌ {QA_INDEX_NAME}.question_vector 类型为 '{qv_type}'（期望 dense_vector）。\n"
+                    f"[ESSetup] ❌ {qa_check_index}.question_vector 类型为 '{qv_type}'（期望 dense_vector）。\n"
                     f"  此索引需要 Reindex 重建，禁止自动删除！\n"
                     f"  Reindex 步骤:\n"
                     f"    1. 以新名创建正确 Mapping 的索引（如 kb_qa_pairs_v2）\n"
                     f"    2. 执行 POST _reindex：src=kb_qa_pairs, dest=kb_qa_pairs_v2\n"
-                    f"    3. 原子切换别名指向 kb_qa_pairs_v2\n"
-                    f"    4. 确认无误后删除旧索引 kb_qa_pairs"
+                    f"    3. 原子切换 {QA_INDEX_READ_ALIAS}/{QA_INDEX_WRITE_ALIAS} 指向 kb_qa_pairs_v2\n"
+                    f"    4. 确认无误后再清理旧索引 kb_qa_pairs"
                 )
         except RuntimeError:
             raise
@@ -264,12 +448,7 @@ class ESSetup:
         if not self.es.indices.exists(index=INDEX_NAME):
             print(f"⚠️ 索引 {INDEX_NAME} 不存在，正在自动创建...")
             mapping = {
-                "settings": {
-                    # 单节点部署：1 主分片，0 副本（避免 yellow 状态告警）
-                    # 扩容时可热更新 number_of_replicas，无需重建索引
-                    "number_of_shards": 1,
-                    "number_of_replicas": 0
-                },
+                "settings": document_index_settings(),
                 "mappings": {
                     "properties": {
                         "content": {
@@ -281,9 +460,16 @@ class ESSetup:
                             "type": "dense_vector",
                             "dims": 1024,
                             "index": True,
-                            "similarity": "cosine"
+                            "similarity": "cosine",
+                            "index_options": {"type": "hnsw", "m": 48, "ef_construction": 400},
                         },
+                        "acl_tokens": {"type": "keyword"},
                         "keywords": {"type": "keyword"},
+                        "source_index": {"type": "keyword"},
+                        "index_code": {"type": "keyword"},
+                        "owner_unit_code": {"type": "keyword"},
+                        "visible_unit_codes": {"type": "keyword"},
+                        "permission_version": {"type": "long"},
                         "metadata": {
                             "properties": {
                                 "source": {"type": "keyword"},
@@ -292,6 +478,12 @@ class ESSetup:
                                 "data_source": {"type": "keyword"},
                                 "owner_dept_id": {"type": "keyword"},
                                 "visible_depts": {"type": "keyword"},
+                                "acl_tokens": {"type": "keyword"},
+                                "source_index": {"type": "keyword"},
+                                "index_code": {"type": "keyword"},
+                                "owner_unit_code": {"type": "keyword"},
+                                "visible_unit_codes": {"type": "keyword"},
+                                "permission_version": {"type": "long"},
                                 "tags": {"type": "keyword"},
                                 "document_number": {"type": "keyword"},
                                 # [Fix] dynamic:false 防止 dynamic_meta 写入随机 key 导致字段数量爆炸
@@ -353,6 +545,12 @@ class ESSetup:
                         "chunk_granularity": {"type": "keyword"},
                         "parent_chunk_id":   {"type": "keyword"},
                         "sparse_vector":     {"type": "rank_features"},
+                        "acl_tokens":        {"type": "keyword"},
+                        "source_index":      {"type": "keyword"},
+                        "index_code":        {"type": "keyword"},
+                        "owner_unit_code":   {"type": "keyword"},
+                        "visible_unit_codes": {"type": "keyword"},
+                        "permission_version": {"type": "long"},
                         # [Fix] colloquial_vector 已从 _update_mapping 移除！
                         # ES 8.x 硬性规则：dense_vector 一旦建立 HNSW 索引（index:true），
                         # 不允许通过 put_mapping 热修改为 index:false，否则报 mapping conflict 错误。
@@ -403,6 +601,11 @@ class ESSetup:
                                 "visibility":      {"type": "keyword"},
                                 "acl_tokens":      {"type": "keyword"},
                                 "access_groups":   {"type": "keyword"},
+                                "source_index":    {"type": "keyword"},
+                                "index_code":      {"type": "keyword"},
+                                "owner_unit_code": {"type": "keyword"},
+                                "visible_unit_codes": {"type": "keyword"},
+                                "permission_version": {"type": "long"},
                                 "uploader_id":     {"type": "keyword"},
                                 "handler_user_ids":   {"type": "keyword"},
                                 "handler_dept_l6":    {"type": "keyword"},
@@ -520,15 +723,31 @@ class ESSetup:
         _target_mapping = {
             "properties": {
                 "question":        {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
-                "question_vector": {"type": "dense_vector", "dims": 1024, "index": True, "similarity": "cosine"},
+                "question_vector": {"type": "dense_vector", "dims": 1024, "index": True, "similarity": "cosine",
+                                    "index_options": {"type": "hnsw", "m": 48, "ef_construction": 400}},
                 "answer_content":  {"type": "text"},
                 "answer_chunk_id": {"type": "keyword"},
                 "section_path":    {"type": "keyword"},
                 "source":          {"type": "keyword"},
+                "acl_tokens":      {"type": "keyword"},
+                "source_index":    {"type": "keyword"},
+                "index_code":      {"type": "keyword"},
+                "owner_unit_code": {"type": "keyword"},
+                "visible_unit_codes": {"type": "keyword"},
+                "permission_version": {"type": "long"},
                 "doc_version":     {"type": "integer"},  # [版本化] 供 registerDoc 2PC 精确版本匹配和 is_latest 切换
                 "is_latest":       {"type": "boolean"}
             }
         }
+
+        # 别名优先：若 kb_qa_read 已解析到某物理索引（如已迁移到 kb_qa_pairs_v2），
+        # 视为 QA 已就绪——仅幂等补注别名，绝不重建旧物理索引 QA_INDEX_NAME，
+        # 否则“迁移后清理旧索引 → 再跑 init”会重建旧索引并把别名挂回，静默回滚整个迁移。
+        existing_via_alias = _alias_targets(self.es, QA_INDEX_READ_ALIAS)
+        if existing_via_alias:
+            print(f"ℹ️ [ESSetup] {QA_INDEX_READ_ALIAS} 已指向 {existing_via_alias}，QA 索引就绪，跳过创建")
+            self._ensure_qa_aliases()
+            return
 
         if self.es.indices.exists(index=QA_INDEX_NAME):
             # init 模式：索引已存在则直接返回，严禁任何删除或修改操作
@@ -538,7 +757,7 @@ class ESSetup:
             return
 
         print(f"[ESSetup] 创建 Q&A 索引 {QA_INDEX_NAME}...")
-        self.es.indices.create(index=QA_INDEX_NAME, body={"mappings": _target_mapping})
+        self.es.indices.create(index=QA_INDEX_NAME, body=qa_index_mapping())
         print(f"✅ [ESSetup] {QA_INDEX_NAME} 创建成功（question_vector=dense_vector/1024/cosine）")
         # 新建索引后立即注册读写别名
         self._ensure_qa_aliases()
@@ -557,32 +776,43 @@ class ESSetup:
           - 读别名无限制：Reindex 期间可同时指向新旧两个物理索引，结果自然合并
           - 幂等：别名已存在时静默跳过，可安全多次调用（init / 服务重启均安全）
         """
+        # 别名感知：分别按 kb_qa_read / kb_qa_write 解析当前正名物理索引。
+        # 已迁移到 kb_qa_pairs_v2 时，正名为 v2；未迁移或新建时回退 QA_INDEX_NAME。
+        # 仅当别名未挂在其正名物理上时才补注，避免在已迁移环境把别名挂回旧索引
+        # （触发 is_write_index 冲突或部分回滚迁移）。
+        read_targets = _alias_targets(self.es, QA_INDEX_READ_ALIAS)
+        read_canon = read_targets[0] if read_targets else QA_INDEX_NAME
+        write_targets = _alias_targets(self.es, QA_INDEX_WRITE_ALIAS)
+        write_canon = write_targets[0] if write_targets else QA_INDEX_NAME
+
         actions = []
         try:
-            existing_aliases = self.es.indices.get_alias(index=QA_INDEX_NAME)
-            current = existing_aliases.get(QA_INDEX_NAME, {}).get("aliases", {})
+            read_current = self.es.indices.get_alias(index=read_canon).get(read_canon, {}).get("aliases", {})
         except Exception:
-            current = {}
+            read_current = {}
+        try:
+            write_current = self.es.indices.get_alias(index=write_canon).get(write_canon, {}).get("aliases", {})
+        except Exception:
+            write_current = {}
 
-        if QA_INDEX_WRITE_ALIAS not in current:
+        if QA_INDEX_WRITE_ALIAS not in write_current:
             actions.append({"add": {
-                "index": QA_INDEX_NAME,
+                "index": write_canon,
                 "alias": QA_INDEX_WRITE_ALIAS,
                 "is_write_index": True
             }})
-        if QA_INDEX_READ_ALIAS not in current:
+        if QA_INDEX_READ_ALIAS not in read_current:
             actions.append({"add": {
-                "index": QA_INDEX_NAME,
+                "index": read_canon,
                 "alias": QA_INDEX_READ_ALIAS
             }})
 
         if not actions:
-            print(f"ℹ️ [ESSetup] QA 别名已存在，跳过注册")
+            print(f"ℹ️ [ESSetup] QA 别名已就绪（read→{read_canon}, write→{write_canon}），跳过注册")
             return
 
         self.es.indices.update_aliases(body={"actions": actions})
-        alias_names = [a["add"]["alias"] for a in actions]
-        print(f"✅ [ESSetup] QA 别名注册完成: {alias_names} → {QA_INDEX_NAME}")
+        print(f"✅ [ESSetup] QA 别名注册完成: read→{read_canon}, write→{write_canon}")
 
 
     def _ensure_template(self):
@@ -606,8 +836,7 @@ class ESSetup:
                             "kb_document": {}  # 别名，Java 侧通过此别名查询无需关心具体版本号
                         },
                         "settings": {
-                            "number_of_shards": 1,
-                            "number_of_replicas": 0,
+                            **document_index_settings(),
                             "analysis": {
                                 "analyzer": {
                                     "ik_smart":    {"type": "custom", "tokenizer": "ik_smart"},
@@ -625,6 +854,12 @@ class ESSetup:
                                 "chunk_granularity": {"type": "keyword"},
                                 "parent_chunk_id":   {"type": "keyword"},
                                 "keywords":          {"type": "keyword"},
+                                "acl_tokens":        {"type": "keyword"},
+                                "source_index":      {"type": "keyword"},
+                                "index_code":        {"type": "keyword"},
+                                "owner_unit_code":   {"type": "keyword"},
+                                "visible_unit_codes": {"type": "keyword"},
+                                "permission_version": {"type": "long"},
                                 "metadata": {
                                     "properties": {
                                         "source":       {"type": "keyword"},
@@ -647,6 +882,11 @@ class ESSetup:
                                         "quality_score":{"type": "float"},
                                         "data_source":  {"type": "keyword"},
                                         "owner_dept_id":{"type": "keyword"},
+                                        "source_index": {"type": "keyword"},
+                                        "index_code": {"type": "keyword"},
+                                        "owner_unit_code": {"type": "keyword"},
+                                        "visible_unit_codes": {"type": "keyword"},
+                                        "permission_version": {"type": "long"},
                                         "publish_time": {"type": "date", "format": "yyyy-MM-dd||epoch_millis"},
                                         "document_number": {"type": "keyword"},
                                         # [缺陷6 修复] section_path 双字段（服务模板，新建索引自动继承）
@@ -730,6 +970,16 @@ class ESSetup:
             # 写别名命名规则：{物理索引名}_write
             write_alias = f"{phys_index}_write"
             try:
+                # 迁移感知：若该写别名已指向另一个物理索引（如已迁到 {phys}_v2），
+                # 说明此索引已迁移、被降级为旧索引，绝不再把 write_index 挂回来——
+                # 否则会与 v2 上的 is_write_index=true 冲突（"more than one write index"）。
+                alias_owner = _alias_targets(self.es, write_alias)
+                migrated_owners = [owner for owner in alias_owner if owner != phys_index]
+                if migrated_owners:
+                    print(f"  ℹ️ [ESSetup] {write_alias} 已指向 {migrated_owners}（{phys_index} 已迁移/降级），跳过注册")
+                    skipped.append(f"{write_alias} (migrated→{migrated_owners[0]})")
+                    continue
+
                 existing = self.es.indices.get_alias(index=phys_index).get(phys_index, {}).get("aliases", {})
                 if write_alias in existing:
                     skipped.append(write_alias)
@@ -752,4 +1002,3 @@ class ESSetup:
             print(f"ℹ️ [ESSetup] 以下写别名已存在，跳过: {skipped}")
         if not registered and not skipped:
             print("ℹ️ [ESSetup] 未发现任何 kb_document_* 索引，跳过写别名注册")
-

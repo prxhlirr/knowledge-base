@@ -104,6 +104,13 @@ services:
       - OCR_MAX_RENDER_PIXELS=6000000
       - NVIDIA_VISIBLE_DEVICES=all
 
+      # ── 文档入库消费者开关（本容器单实例必须开启）──────────────────
+      # main.py 仅在 AI_START_WORKER=true 或 AI_CAPABILITIES 含 worker/index/ingest 时，
+      # 才以进程内守护线程拉起 task_worker 去 brpop DOC_TASK_QUEUE_HIGH/LOW。
+      # 注意：AI_CAPABILITIES=all 默认【不包含】worker；本 compose 未挂载 /app/config/.env，
+      # 全部依赖此 environment 块。不设此项 → 后台上传的文档永远堆积在 Redis 队列无人消费。
+      - AI_START_WORKER=true
+
       # 模型加载策略：默认不在服务启动时占用显存，首次向量化/重排时懒加载
       - AI_MODEL_PRELOAD=false
       - AI_MODEL_IDLE_UNLOAD=true

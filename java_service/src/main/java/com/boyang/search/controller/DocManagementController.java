@@ -266,7 +266,7 @@ public class DocManagementController {
             }
             int expectedCount = latest.getChunkCount() != null ? latest.getChunkCount() : 0;
             CountRequest countReq = CountRequest.of(cr -> cr
-                .index("kb_document_v*")
+                .index("kb_document") // 读别名 -> 各分区 v2 索引（kb_document_v* 仅匹配空的 v1，导致恒误报）
                 .query(q -> q.bool(b -> b
                     .must(m -> m.term(t -> t.field("metadata.source").value(sourceName)))
                     .must(m -> m.term(t -> t.field("metadata.is_latest").value(true)))

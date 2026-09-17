@@ -2904,7 +2904,7 @@ public class SearchService {
         try {
             final List<Double> finalVec = queryVector;
             SearchRequest qaRequest = new SearchRequest.Builder()
-                    .index("kb_qa_pairs")
+                    .index("kb_qa_read") // QA 读别名 -> kb_qa_pairs_v2（v2 迁移后不再读已降级的旧物理索引）
                     .knn(k -> k.field("question_vector")
                             .queryVector(finalVec)
                             .k(limit * 2) // top-k ?

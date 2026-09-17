@@ -4,8 +4,12 @@ import co.elastic.clients.elasticsearch._types.FieldValue;
 import co.elastic.clients.elasticsearch._types.query_dsl.Query;
 import co.elastic.clients.util.ObjectBuilder;
 import com.boyang.search.entity.SysAiTuningConfig;
+import com.boyang.search.security.JwtVerifier;
+import com.boyang.search.security.UserContextHolder;
+import com.boyang.search.service.DeptTreeService;
 import com.boyang.search.service.SysGovSynonymService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -33,6 +37,12 @@ public class EsRecallUtils {
 
     @Autowired
     private SysGovSynonymService govSynonymService;
+
+    @Value("${kb.search.legacy-missing-permission-allow:false}")
+    private boolean legacyMissingPermissionAllow = false;
+
+    @Value("${kb.search.doc-search-missing-source-index-allow:false}")
+    private boolean docSearchMissingSourceIndexAllow = false;
 
     // ─── 权限过滤 ────────────────────────────────────────────────────────────
 
@@ -69,12 +79,15 @@ public class EsRecallUtils {
             tokenValues.add(FieldValue.of(token));
         }
 
-        return f -> f.bool(mixedBool -> {
-            // 分支A：新架构 —— acl_tokens 与用户 token 集合求交，命中任一即有权
+        return f -> f.bool(rootBool -> rootBool
+            .filter(unit -> buildVisibleUnitFilter(unit, true))
+            .filter(permission -> permission.bool(mixedBool -> {
+            // 分支A：新架构 —— acl_tokens 与用户 token 集合求交，命中任一即有权。
+            // v2 迁移后所有读路径只命中纯 keyword 的 v2 索引，acl_tokens / metadata.acl_tokens 均为 keyword；
+            // 旧的 acl_tokens.keyword / metadata.acl_tokens.keyword 兼容子句已无命中对象，已移除。
+            // 若未来读路径重新纳入 text 型 acl_tokens 索引，需还原 .keyword 双查。
             mixedBool.should(s -> s.terms(t -> t.field("acl_tokens")
                 .terms(tv -> tv.value(tokenValues))));
-
-            // 兼容当前主 chunk 曾写入 metadata.acl_tokens 的存量数据。
             mixedBool.should(s -> s.terms(t -> t.field("metadata.acl_tokens")
                 .terms(tv -> tv.value(tokenValues))));
 
@@ -85,13 +98,17 @@ public class EsRecallUtils {
                 legacyBool.must(m -> m.bool(permBool -> {
                     if (isAnonymous) {
                         permBool.should(sh -> sh.term(t -> t.field("metadata.visibility").value("PUBLIC")));
-                        permBool.should(sh -> sh.bool(bNot -> bNot.mustNot(mn -> mn.exists(e -> e.field("metadata.visibility")))));
+                        if (legacyMissingPermissionAllow) {
+                            permBool.should(sh -> sh.bool(bNot -> bNot.mustNot(mn -> mn.exists(e -> e.field("metadata.visibility")))));
+                        }
                     } else {
                         permBool.should(sh -> sh.terms(t -> t.field("metadata.visibility")
                             .terms(tv -> tv.value(Arrays.asList(
                                 FieldValue.of("PUBLIC"),
                                 FieldValue.of("INTERNAL"))))));
-                        permBool.should(sh -> sh.bool(bNot -> bNot.mustNot(mn -> mn.exists(e -> e.field("metadata.visibility")))));
+                        if (legacyMissingPermissionAllow) {
+                            permBool.should(sh -> sh.bool(bNot -> bNot.mustNot(mn -> mn.exists(e -> e.field("metadata.visibility")))));
+                        }
                         if (!deptValues.isEmpty()) {
                             permBool.should(sh -> sh.terms(t -> t.field("metadata.dept_code_full")
                                 .terms(tv -> tv.value(deptValues))));
@@ -114,7 +131,7 @@ public class EsRecallUtils {
             // 分支A 或分支B 命中其一即通过
             mixedBool.minimumShouldMatch("1");
             return mixedBool;
-        });
+            })));
     }
 
     /**
@@ -148,8 +165,11 @@ public class EsRecallUtils {
             tokenValues.add(FieldValue.of(token));
         }
 
-        return f -> f.bool(mixedBool -> {
+        return f -> f.bool(rootBool -> rootBool
+            .filter(unit -> buildVisibleUnitFilter(unit, false))
+            .filter(permission -> permission.bool(mixedBool -> {
             // 分支A：acl_tokens 交集（顶层字段，kb_doc_search_v1 只有顶层 acl_tokens）
+            // v2 迁移后 acl_tokens 为纯 keyword，旧的 acl_tokens.keyword 兼容子句已移除。
             mixedBool.should(s -> s.terms(t -> t.field("acl_tokens")
                 .terms(tv -> tv.value(tokenValues))));
 
@@ -159,15 +179,19 @@ public class EsRecallUtils {
                 legacyBool.must(m -> m.bool(permBool -> {
                     if (isAnonymous) {
                         permBool.should(sh -> sh.term(t -> t.field("visibility").value("PUBLIC")));
-                        permBool.should(sh -> sh.bool(b -> b.mustNot(
-                            mn -> mn.exists(e -> e.field("visibility")))));
+                        if (legacyMissingPermissionAllow) {
+                            permBool.should(sh -> sh.bool(b -> b.mustNot(
+                                mn -> mn.exists(e -> e.field("visibility")))));
+                        }
                     } else {
                         permBool.should(sh -> sh.terms(t -> t.field("visibility")
                             .terms(tv -> tv.value(Arrays.asList(
                                 FieldValue.of("PUBLIC"),
                                 FieldValue.of("INTERNAL"))))));
-                        permBool.should(sh -> sh.bool(b -> b.mustNot(
-                            mn -> mn.exists(e -> e.field("visibility")))));
+                        if (legacyMissingPermissionAllow) {
+                            permBool.should(sh -> sh.bool(b -> b.mustNot(
+                                mn -> mn.exists(e -> e.field("visibility")))));
+                        }
                         if (!deptValues.isEmpty()) {
                             // kb_doc_search 使用 owner_dept_id（顶层字段），而非 metadata.dept_code_full
                             permBool.should(sh -> sh.terms(t -> t.field("owner_dept_id")
@@ -183,7 +207,136 @@ public class EsRecallUtils {
             // 分支A 或分支B 命中其一即通过
             mixedBool.minimumShouldMatch("1");
             return mixedBool;
+            })));
+    }
+
+    private ObjectBuilder<Query> buildVisibleUnitFilter(Query.Builder query, boolean includeMetadataField) {
+        List<FieldValue> values = buildVisibleUnitValuesForCurrentUser();
+        String visibilityField = includeMetadataField ? "metadata.visibility" : "visibility";
+        return query.bool(unitBool -> {
+            // 只有 DEPT 文档需要单位链硬约束；PUBLIC/INTERNAL/PRIVATE/GRANT 由 acl_tokens 和后置 MySQL 权限决定。
+            unitBool.should(nonDept -> nonDept.bool(b -> b
+                .mustNot(mn -> mn.term(t -> t.field(visibilityField).value("DEPT")))));
+            unitBool.should(dept -> dept.bool(deptBool -> {
+                deptBool.must(m -> m.term(t -> t.field(visibilityField).value("DEPT")));
+                deptBool.must(m -> m.bool(visible -> {
+                    visible.should(s -> s.terms(t -> t.field("visible_unit_codes")
+                        .terms(tv -> tv.value(values))));
+                    if (includeMetadataField) {
+                        visible.should(s -> s.terms(t -> t.field("metadata.visible_unit_codes")
+                            .terms(tv -> tv.value(values))));
+                    }
+                    visible.minimumShouldMatch("1");
+                    return visible;
+                }));
+                return deptBool;
+            }));
+            unitBool.minimumShouldMatch("1");
+            return unitBool;
         });
+    }
+
+    public List<FieldValue> buildVisibleUnitValuesForCurrentUser() {
+        List<FieldValue> values = new ArrayList<>();
+        values.add(FieldValue.of("global"));
+        JwtVerifier.UserIdentity identity = UserContextHolder.getIdentity();
+        if (identity == null || identity.getDeptCode() == null || identity.getDeptCode().trim().isEmpty()) {
+            return values;
+        }
+        String deptCode = identity.getDeptCode().trim();
+        if (!"global".equals(deptCode)) {
+            values.add(FieldValue.of(deptCode));
+            String normalizedDeptCode = DeptTreeService.normalizeDeptCode(deptCode);
+            if (normalizedDeptCode != null
+                    && !normalizedDeptCode.isEmpty()
+                    && !normalizedDeptCode.equals(deptCode)) {
+                values.add(FieldValue.of(normalizedDeptCode));
+            }
+        }
+        return values;
+    }
+
+    /**
+     * kb_doc_search_v1 专用物理索引范围过滤。
+     *
+     * 业务功能：
+     *   将 SearchIndexResolver 已经解析出的 chunk 可读物理索引范围，下推到 doc_search 文档级预召回。
+     *   新数据优先通过顶层 source_index 精确约束候选文档，避免角色只允许读取某类索引时，
+     *   doc_search 仍把其他索引的 source 放进后续 chunk 召回候选池。
+     *
+     * 关键流程：
+     *   1. 解析逗号分隔的 resolvedIndexPattern，只保留 kb_document_* 物理索引；
+     *   2. 遇到 kb_document 读别名或通配符时，说明当前范围无法在 doc_search 中精确收窄，返回 match_all；
+     *   3. 对有 source_index 的新数据执行 terms 过滤；
+     *   4. 对没有 source_index 的历史数据放行，由 buildDocSearchPermFilter 和后续 chunk 索引查询继续兜底。
+     *
+     * @param resolvedIndexPattern 当前请求可读 chunk 索引范围
+     * @return ES Filter Query Builder Function
+     */
+    public Function<Query.Builder, ObjectBuilder<Query>> buildDocSearchSourceIndexFilter(String resolvedIndexPattern) {
+        List<FieldValue> readableSourceIndexes = buildReadableSourceIndexValues(resolvedIndexPattern);
+        if (readableSourceIndexes.isEmpty()) {
+            return f -> f.matchAll(m -> m);
+        }
+
+        return f -> f.bool(indexBool -> indexBool
+            .should(s -> s.terms(t -> t.field("source_index")
+                .terms(tv -> tv.value(readableSourceIndexes))))
+            .should(s -> s.bool(missing -> {
+                if (docSearchMissingSourceIndexAllow) {
+                    missing.mustNot(mn -> mn.exists(e -> e.field("source_index")));
+                } else {
+                    missing.must(m -> m.term(t -> t.field("source_index").value("__legacy_source_index_denied__")));
+                }
+                return missing;
+            }))
+            .minimumShouldMatch("1")
+        );
+    }
+
+    /**
+     * 从可读索引表达式中提取可用于 doc_search.source_index 过滤的物理索引名。
+     *
+     * 设计取舍：
+     *   source_index 是文档写入时记录的真实 chunk 索引名，只能和确定的物理索引做等值匹配。
+     *   当表达式包含 kb_document 读别名或通配符时，不在 Java 侧猜测别名展开结果，避免把合法数据误过滤。
+     *
+     * @param resolvedIndexPattern 逗号分隔的可读索引表达式
+     * @return source_index terms 查询值列表
+     */
+    public List<FieldValue> buildReadableSourceIndexValues(String resolvedIndexPattern) {
+        if (resolvedIndexPattern == null || resolvedIndexPattern.trim().isEmpty()) {
+            return Collections.emptyList();
+        }
+        String trimmedPattern = resolvedIndexPattern.trim();
+        if ("__no_readable_index__".equals(trimmedPattern)) {
+            return Collections.singletonList(FieldValue.of("__no_readable_index__"));
+        }
+
+        Set<String> values = new LinkedHashSet<>();
+        String[] parts = trimmedPattern.split(",");
+        for (String rawPart : parts) {
+            String part = rawPart != null ? rawPart.trim() : "";
+            if (part.isEmpty()) {
+                continue;
+            }
+            if ("kb_document".equals(part) || part.contains("*")) {
+                return Collections.emptyList();
+            }
+            if (part.startsWith("kb_document_")) {
+                values.add(part);
+                String logicalIndex = part.replaceFirst("_v\\d+$", "");
+                if (!logicalIndex.equals(part)) {
+                    // kb_doc_search.source_index 存量按逻辑索引名写入，读路径解析出的 v2 物理名必须兼容逻辑名，否则会漏召回。
+                    values.add(logicalIndex);
+                }
+            }
+        }
+        List<FieldValue> fieldValues = new ArrayList<>();
+        for (String value : values) {
+            fieldValues.add(FieldValue.of(value));
+        }
+        return fieldValues;
     }
 
     /**

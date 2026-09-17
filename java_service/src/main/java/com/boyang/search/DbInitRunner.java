@@ -171,6 +171,37 @@ public class DbInitRunner implements CommandLineRunner {
 
             System.out.println("========== [文档注册] kb_doc_registry 已就位 ==========");
 
+            // ===== [第三方文档增量同步] registry 加 full_hash 列（全文件 SHA-256，对账锚点）=====
+            // 与 content_hash（前 8K）独立，避免污染现有前 8K 去重口径。
+            // full_hash 由 dbDocExtractJob 对账逻辑与 dbFullHashBackfillJob 写入。
+            try { jdbcTemplate.execute("ALTER TABLE public.kb_doc_registry ADD COLUMN IF NOT EXISTS full_hash VARCHAR(64)"); } catch (Exception ignore) {}
+            try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_kdr_full_hash ON public.kb_doc_registry (full_hash)"); } catch (Exception ignore) {}
+
+            // ===== [第三方文档增量同步] 同步映射表 kb_doc_sync_record =====
+            // 业务功能：第三方源表完全只读，本表承载增量同步状态机与 full_hash 对账锚点。
+            // 状态机：PENDING(待处理) → DISPATCHED(已派发等Python) → CONFIRMED(对账命中) / FAILED(重试耗尽)
+            jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS public.kb_doc_sync_record (" +
+                "id                   BIGSERIAL       PRIMARY KEY," +
+                "source_system        VARCHAR(64)     NOT NULL," +             // DB_DOC_SYNC / DB_HTML_SYNC
+                "source_table         VARCHAR(128)    NOT NULL," +            // 第三方源表名
+                "source_id            VARCHAR(128)    NOT NULL," +            // 源表主键
+                "source_update_time   TIMESTAMP(3)," +                        // 源表 update_time（增量游标）
+                "full_hash            VARCHAR(64)," +                         // 全文件 SHA-256（对账锚点）
+                "file_name            VARCHAR(512)," +                        // 唯一化后 source_name
+                "sync_status          VARCHAR(16)     NOT NULL DEFAULT 'PENDING'," +
+                "batch_id             VARCHAR(64)," +                         // ingest 返回值
+                "retry_count          INT             NOT NULL DEFAULT 0," +
+                "error_msg            VARCHAR(1024)," +
+                "dispatched_at        TIMESTAMP(3)," +
+                "updated_at           TIMESTAMP(3)    NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+                "created_at           TIMESTAMP(3)    NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+                "UNIQUE (source_table, source_id)" +                          // 一条源记录一条映射（幂等基础）
+                ")");
+            try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_kdsr_status   ON public.kb_doc_sync_record (sync_status)");           } catch (Exception ignore) {}
+            try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_kdsr_updtime  ON public.kb_doc_sync_record (source_update_time)");     } catch (Exception ignore) {}
+            try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_kdsr_fullhash ON public.kb_doc_sync_record (full_hash)");              } catch (Exception ignore) {}
+            System.out.println("========== [第三方同步] kb_doc_sync_record 映射表已就位 ==========");
+
             // ===== [P0-5 完整实现] GRANT 授权明细表 kb_doc_grants =====
             // 替代原来依赖 ES granted_users 字段的方案，MySQL 作为 GRANT 权限唯一权威来源。
             jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS public.kb_doc_grants (" +

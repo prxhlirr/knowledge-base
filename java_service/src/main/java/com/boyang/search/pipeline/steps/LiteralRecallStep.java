@@ -10,6 +10,7 @@ import com.boyang.search.entity.SysTenantPolicy;
 import com.boyang.search.pipeline.SearchContext;
 import com.boyang.search.pipeline.SearchPipelineStep;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -29,13 +30,19 @@ public class LiteralRecallStep implements SearchPipelineStep {
     private static final String DEFAULT_ORG = "";
     private static final int MAX_LITERAL_HITS = 10;
     private static final int TITLE_PHRASE_MIN_LENGTH = 8;
-    private static final String LITERAL_TIMEOUT = "1000ms";
 
     @Autowired
     private ElasticsearchClient esClient;
 
     @Autowired
     private EsRecallUtils utils;
+
+    /**
+     * 业务功能：控制字面量精确探测 ES 查询超时。
+     * 设计原因：literal 是高置信短路路径，生产环境需要按索引规模和 SLA 调整，不能固化为代码常量。
+     */
+    @Value("${search.literal.timeout-ms:${SEARCH_LITERAL_TIMEOUT_MS:1000}}")
+    private String literalTimeoutMs = "1000";
 
     @Override
     @SuppressWarnings("unchecked")
@@ -138,7 +145,7 @@ public class LiteralRecallStep implements SearchPipelineStep {
                 .index(indexPattern)
                 .trackTotalHits(h -> h.enabled(false))
                 .size(size)
-                .timeout(LITERAL_TIMEOUT)
+                .timeout(resolveLiteralTimeoutMs() + "ms")
                 .query(q -> q.bool(b -> {
                     for (String query : queries) {
                         b.should(s -> s.term(t -> t.field("metadata.document_number").value(query).boost(20.0f)));
@@ -171,7 +178,7 @@ public class LiteralRecallStep implements SearchPipelineStep {
                 .index(indexPattern)
                 .trackTotalHits(h -> h.enabled(false))
                 .size(size)
-                .timeout(LITERAL_TIMEOUT)
+                .timeout(resolveLiteralTimeoutMs() + "ms")
                 .query(q -> q.bool(b -> {
                     for (String query : phraseQueries) {
                         b.should(s -> s.matchPhrase(mp -> mp.field("metadata.title")
@@ -242,7 +249,34 @@ public class LiteralRecallStep implements SearchPipelineStep {
         result.put("_literal_hit", Boolean.TRUE);
         result.put("_id", hit.id());
         result.put("_es_score", hit.score() != null ? hit.score() : 0.0);
+        copyPermissionProjection(result, source, metadata);
         return result;
+    }
+
+    private void copyPermissionProjection(Map<String, Object> result, Map<String, Object> source,
+                                          Map<String, Object> metadata) {
+        // 权限投影字段来自 ES _source；出站结果不保留 _source，所以必须提升到顶层供审计和后续过滤使用。
+        putIfPresent(result, "source_index", source != null ? source.get("source_index") : null,
+                metadata != null ? metadata.get("source_index") : null);
+        putIfPresent(result, "index_code", source != null ? source.get("index_code") : null,
+                metadata != null ? metadata.get("index_code") : null);
+        putIfPresent(result, "owner_unit_code", source != null ? source.get("owner_unit_code") : null,
+                metadata != null ? metadata.get("owner_unit_code") : null);
+        putIfPresent(result, "visible_unit_codes", source != null ? source.get("visible_unit_codes") : null,
+                metadata != null ? metadata.get("visible_unit_codes") : null);
+        putIfPresent(result, "permission_version", source != null ? source.get("permission_version") : null,
+                metadata != null ? metadata.get("permission_version") : null);
+    }
+
+    private void putIfPresent(Map<String, Object> result, String key, Object primary, Object fallback) {
+        Object value = primary != null ? primary : fallback;
+        if (value == null) {
+            return;
+        }
+        if (value instanceof String && ((String) value).trim().isEmpty()) {
+            return;
+        }
+        result.put(key, value);
     }
 
     @SuppressWarnings("unchecked")
@@ -263,6 +297,22 @@ public class LiteralRecallStep implements SearchPipelineStep {
             query = context.getQueryText();
         }
         return query == null ? "" : query.trim();
+    }
+
+    int resolveLiteralTimeoutMs() {
+        return resolvePositiveTimeoutMs(literalTimeoutMs, 1000);
+    }
+
+    int resolvePositiveTimeoutMs(String configured, int defaultValue) {
+        if (configured == null) {
+            return defaultValue;
+        }
+        try {
+            int parsed = Integer.parseInt(configured.trim());
+            return parsed > 0 ? parsed : defaultValue;
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
     }
 
     private String extractDocHash(String esId) {

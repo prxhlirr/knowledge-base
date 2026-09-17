@@ -132,7 +132,42 @@ public class DocIngestService {
     }
 
     public String ingest(DocIngestRequest req) throws Exception {
-        return ingest(req, null);
+        return ingest(req, currentOperatorId());
+    }
+
+    private String currentOperatorId() {
+        com.boyang.search.security.JwtVerifier.UserIdentity identity =
+                com.boyang.search.security.UserContextHolder.getIdentity();
+        return identity != null ? identity.getUserId() : null;
+    }
+
+    /**
+     * 校验入库请求的身份边界。
+     * 业务功能：区分用户触发入库和系统同步入库，避免用户入口在登录上下文丢失时降级为免权限校验的系统入库。
+     * 关键流程：有操作者身份时继续走用户权限校验；无操作者身份时，仅允许可信系统来源进入后续流程。
+     */
+    void validateIngestPrincipal(DocIngestRequest req, String operatorId) {
+        if (operatorId != null && !operatorId.trim().isEmpty()) {
+            return;
+        }
+
+        String sourceSystem = req != null ? req.getSourceSystem() : "";
+        if (this.isTrustedSystemIngestSource(sourceSystem)) {
+            log.info("[DocIngest] trusted system ingest sourceSystem={}", sourceSystem);
+            return;
+        }
+
+        throw new SecurityException("[DocIngest] 用户入库缺少操作者身份，拒绝降级为系统入库 sourceSystem=" + sourceSystem);
+    }
+
+    /**
+     * 判断是否为可信系统入库来源。
+     * 业务功能：为已验证的数据库同步入口保留无登录态入库能力。
+     * 关键流程：只接受代码中真实使用的系统来源，避免请求方伪造 sourceSystem 绕过用户权限校验。
+     */
+    boolean isTrustedSystemIngestSource(String sourceSystem) {
+        String source = sourceSystem == null ? "" : sourceSystem.trim().toUpperCase();
+        return "DB_HTML_SYNC".equals(source) || "DB_DOC_SYNC".equals(source);
     }
 
     /**
@@ -144,22 +179,30 @@ public class DocIngestService {
      * 3. createAndDispatch — 写 MySQL + 计算 acl_tokens（JSON 数组）+ 推入 Redis 队列
      *
      * @param req        入库请求 DTO
-     * @param operatorId 当前操作者用户 ID（从 Session/JWT 中提取，为 null 时跳过权限校验）
+     * @param operatorId 当前操作者用户 ID（从 Session/JWT 中提取，用户入口不允许为空）
      */
     public String ingest(DocIngestRequest req, String operatorId) throws Exception {
         this.validateRequest(req);
+        this.validateIngestPrincipal(req, operatorId);
         // [D4 修复] 权限校验（同步执行，确保非法请求立即被拦截）
-        if (operatorId != null) {
+        if (operatorId != null && !operatorId.trim().isEmpty()) {
             this.validatePermission(req, operatorId);
         }
 
         String batchId = UUID.randomUUID().toString();
         SysDocBatch batch = this.initBatch(batchId, req);
 
+        // [竞态修复] 在跨越异步边界（submit）之前，于请求线程内同步固化 MultipartFile 字节。
+        // 根因：MultipartFile 背后是 Tomcat 请求级临时文件，控制器返回后会被 cleanupMultipart() 删除；
+        //       若把 file::getInputStream 作为懒加载流交给异步 worker，会随机命中「系统找不到指定的文件」，
+        //       导致 processFile 返回 null、count=0、不入队（用户体感：上传了却没进队列）。
+        // 修复：请求线程内临时文件仍在，getBytes() 必成功；固化后异步 worker 只读堆内字节。
+        this.materializeUploadBytes(req);
+
         // [P0 优化] 核心架构重构：将扫描和派发整体异步化
         // 理由：针对 20,000 个文件的本地扫描，即使不读内容，递归 Files.walk 依然可能耗时数分钟。
         // 通过异步化，API 可以在 <1s 内返回 batchId，前端可轮询进度。
-        new Thread(() -> {
+        this.ingestExecutor.submit(() -> {
             try {
                 IngestStrategy strategy = ingestStrategyFactory.getStrategy(req.getIngestType());
                 
@@ -170,6 +213,11 @@ public class DocIngestService {
                 batch.setTotalCount(req.getUploadFiles() != null && req.getUploadFiles().length > 0
                         ? req.getUploadFiles().length
                         : taskInfos.size() + batch.getErrorCount());
+                // 全部文件失败/去重（无任何任务产出）→ 终态 FAILED；否则保持 IMPORTING 等回调推进到 DONE。
+                // 原行为：taskInfos 空时批次永远卡在 IMPORTING，前端无法感知失败。
+                if (taskInfos.isEmpty() && batch.getErrorCount() > 0) {
+                    batch.setStatus("FAILED");
+                }
                 this.sysDocBatchService.updateById(batch);
 
                 if (!taskInfos.isEmpty()) {
@@ -195,7 +243,7 @@ public class DocIngestService {
                 batch.setStatus("ERROR");
                 this.sysDocBatchService.updateById(batch);
             }
-        }).start();
+        });
 
         return batchId;
     }
@@ -296,6 +344,35 @@ public class DocIngestService {
     }
 
     /**
+     * [竞态修复] 在请求线程内同步读取 UPLOAD 文件的字节，固化到 {@link DocIngestRequest#getUploadFileBytes()}。
+     * <p>
+     * 必须在 {@code ingestExecutor.submit} 之前调用（即仍在 HTTP 请求线程内）：
+     * 此时 MultipartFile 背后的 Tomcat 临时文件尚未被 cleanupMultipart() 删除，{@code getBytes()} 必定成功。
+     * 之后异步 worker 通过 {@link UploadIngestStrategy} 以 ByteArrayInputStream 形式消费这些堆内字节，
+     * 与临时文件生命周期彻底解耦，消除「系统找不到指定的文件」竞态。
+     * <p>
+     * 仅对 UPLOAD（uploadFiles 非空）生效；LOCAL/SFTP/URL 文件源是稳定路径/URL，无需此步。
+     * 单文件读取异常（理论不应发生在请求线程内）保守置 null，交由 UploadIngestStrategy 计入 errorCount。
+     */
+    private void materializeUploadBytes(DocIngestRequest req) {
+        org.springframework.web.multipart.MultipartFile[] files = req.getUploadFiles();
+        if (files == null || files.length == 0) {
+            return;
+        }
+        byte[][] bytes = new byte[files.length][];
+        for (int i = 0; i < files.length; i++) {
+            try {
+                bytes[i] = files[i].getBytes();
+            } catch (Exception e) {
+                log.error("[DocIngest] 同步读取上传字节失败 name={} err={}",
+                        files[i].getOriginalFilename(), e.getMessage());
+                bytes[i] = null;
+            }
+        }
+        req.setUploadFileBytes(bytes);
+    }
+
+    /**
      * [T1-5 Outbox] 事务性任务派发。
      * 在单一 @Transactional 内完成所有 MySQL 写入，包括：
      * - sys_doc_import_task 记录（任务池）
@@ -388,6 +465,8 @@ public class DocIngestService {
                 List<String> aclTokens = computeAclTokens(
                         visibility, deptCode, uploaderId, grantedUsers, grantedRoles);
                 payload.put("acl_tokens_json", this.objectMapper.writeValueAsString(aclTokens));
+                Map<String, Object> unitProjection = buildUnitPermissionProjection(deptCode);
+                payload.putAll(unitProjection);
                 payload.put("grantedUserIds", grantedUsers);
                 payload.put("grantedRoles", grantedRoles);
 
@@ -548,5 +627,43 @@ public class DocIngestService {
 
         log.debug("[DocIngest] computeAclTokens vis={} dept={} tokens={}", vis, deptCode, tokens);
         return tokens;
+    }
+
+    /**
+     * 业务功能：为 Python 入库 Worker 预计算单位权限投影字段。
+     * 关键流程：以文档归属 deptCode 为权威输入，复用 DeptTreeService 构建“本级 + 上级”链路，
+     *          让 ES 查询侧只需要用当前用户单位做 terms 命中即可实现“上级可见下级文档”。
+     * 设计原因：组织树属于 Java 侧权限域，Python 只负责索引写入，避免两端重复维护单位层级规则。
+     *
+     * @param deptCode 文档归属单位编码，允许为空
+     * @return ownerUnitCode、visibleUnitCodes、permissionVersion 三个 Redis payload 字段
+     */
+    Map<String, Object> buildUnitPermissionProjection(String deptCode) {
+        Map<String, Object> projection = new HashMap<>();
+        String ownerUnitCode = DeptTreeService.normalizeDeptCode(deptCode);
+        List<String> visibleUnitCodes = new ArrayList<>();
+
+        if (!ownerUnitCode.isEmpty()) {
+            List<String> chain = deptTreeService != null
+                    ? deptTreeService.buildAclChain(ownerUnitCode)
+                    : Collections.emptyList();
+            if (chain != null && !chain.isEmpty()) {
+                for (String code : chain) {
+                    if (code != null && !code.trim().isEmpty() && !visibleUnitCodes.contains(code.trim())) {
+                        visibleUnitCodes.add(code.trim());
+                    }
+                }
+            }
+            if (visibleUnitCodes.isEmpty()) {
+                visibleUnitCodes.add(ownerUnitCode);
+            }
+        } else {
+            visibleUnitCodes.add("global");
+        }
+
+        projection.put("ownerUnitCode", ownerUnitCode.isEmpty() ? "global" : ownerUnitCode);
+        projection.put("visibleUnitCodes", visibleUnitCodes);
+        projection.put("permissionVersion", System.currentTimeMillis());
+        return projection;
     }
 }

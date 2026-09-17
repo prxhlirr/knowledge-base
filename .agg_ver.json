@@ -1,0 +1,1 @@
+{"size":0,"aggs":{"by_source":{"terms":{"field":"metadata.source","size":1000},"aggs":{"by_ver":{"terms":{"field":"metadata.doc_version","size":50},"aggs":{"true_cnt":{"filter":{"term":{"metadata.is_latest":true}}}}}}}}

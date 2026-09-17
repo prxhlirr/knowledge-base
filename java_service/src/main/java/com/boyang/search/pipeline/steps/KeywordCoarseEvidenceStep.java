@@ -37,11 +37,16 @@ import java.util.stream.Collectors;
 @Component
 public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
 
-    private static final int MAX_DISPLAY_COARSE = 3;
+    /**
+     * 业务功能：控制每个 keyword 命中文档最多展示多少条 coarse 证据。
+     * 设计原因：展示证据条数会影响回表 size、响应体大小和前端证据密度，生产环境需要可调。
+     */
+    @Value("${search.keyword.coarse.display-size:${SEARCH_KEYWORD_COARSE_DISPLAY_SIZE:3}}")
+    private String displayCoarseSize = "3";
 
     /**
      * [性能/可回滚] 每个 doc 槽位拉取的匹配 coarse 分片数上限。
-     * 展示仅需 MAX_DISPLAY_COARSE=3 条，原硬编码 50 远超需求（首页 topK=50 时一次拉 7500 chunk）。
+     * 展示默认仅需 3 条，原硬编码 50 远超需求（首页 topK=50 时一次拉 7500 chunk）。
      * 默认 12（给 chooseCoverageChunks 留选取余量），可通过 search.keyword.coarse.matching-size 调整。
      */
     @Value("${search.keyword.coarse.matching-size:12}")
@@ -69,16 +74,7 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
 
         KeywordQueryPlan plan = context.getKeywordQueryPlan();
         List<String> terms = plan != null ? plan.safeRequiredTerms() : context.getKeywordFilterTerms();
-        String indexPattern = context.getResolvedIndexPattern() != null
-                ? context.getResolvedIndexPattern()
-                : context.getTenantPolicy().getIndexPattern();
-        if (indexPattern != null && indexPattern.contains(",")) {
-            if (indexPattern.contains("kb_document_")) {
-                indexPattern = "kb_document";
-            } else {
-                indexPattern = indexPattern.split(",")[0];
-            }
-        }
+        String indexPattern = resolveEvidenceIndexPattern(context);
 
         Map<String, List<Map<String, Object>>> chunksByDoc = new LinkedHashMap<>();
         List<Map<String, Object>> enrichedDocs = new ArrayList<>();
@@ -157,6 +153,30 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
                 List<Map<String, Object>> chunks = castChunkList(doc.get("chunks"));
                 if ((chunks == null || chunks.isEmpty()) && fallbackByDoc.containsKey(docId)) {
                     chunks = fallbackByDoc.get(docId);
+                    chunksByDoc.put(docId, chunks);
+                    doc.put("chunks", chunks);
+                }
+            }
+        }
+
+        List<String> idPrefixFallbackDocIds = new ArrayList<>();
+        for (Map<String, Object> doc : limitedDocs) {
+            String docId = stringValue(doc.get("doc_id"));
+            List<Map<String, Object>> chunks = castChunkList(doc.get("chunks"));
+            if (chunks == null || chunks.isEmpty() || !chunksContainAnyMatchedTerm(chunks, terms)) {
+                idPrefixFallbackDocIds.add(docId);
+            }
+        }
+        if (!idPrefixFallbackDocIds.isEmpty()) {
+            Map<String, List<Map<String, Object>>> prefixByDoc = fetchIdPrefixMatchingCoarseBatched(
+                    indexPattern, idPrefixFallbackDocIds, terms);
+            for (Map<String, Object> doc : limitedDocs) {
+                String docId = stringValue(doc.get("doc_id"));
+                List<Map<String, Object>> chunks = castChunkList(doc.get("chunks"));
+                if ((chunks == null || chunks.isEmpty() || !chunksContainAnyMatchedTerm(chunks, terms)) && prefixByDoc.containsKey(docId)) {
+                    // 这里是正文证据的最后兜底：即使元数据已经覆盖关键词，也必须优先返回真实命中的 chunk，
+                    // 否则组装层只能生成 doc-level fallback，前端没有包含关键词的正文可高亮。
+                    chunks = chooseCoverageChunks(prefixByDoc.get(docId), terms, new LinkedHashSet<>());
                     chunksByDoc.put(docId, chunks);
                     doc.put("chunks", chunks);
                 }
@@ -321,6 +341,65 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
         return result;
     }
 
+    private Map<String, List<Map<String, Object>>> fetchIdPrefixMatchingCoarseBatched(
+            String indexPattern, List<String> docIds, List<String> terms) throws Exception {
+
+        Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
+        for (String docId : docIds) {
+            result.put(docId, new ArrayList<>());
+        }
+        if (docIds == null || docIds.isEmpty() || terms == null || terms.isEmpty()) {
+            return result;
+        }
+
+        MsearchResponse<Object> response = esClient.msearch(new MsearchRequest.Builder()
+                .searches(java.util.Collections.singletonList(buildIdPrefixMatchingCoarseRequestItem(indexPattern, docIds, terms)))
+                .maxConcurrentSearches(1L)
+                .build(), Object.class);
+        if (response == null || response.responses() == null || response.responses().isEmpty()) {
+            return result;
+        }
+        MultiSearchResponseItem<Object> item = response.responses().get(0);
+        if (item != null && item.isResult()) {
+            processGroupedHits(item.result(), terms, new LinkedHashSet<>(docIds), new HashMap<>(), result);
+        }
+        return result;
+    }
+
+    private RequestItem buildIdPrefixMatchingCoarseRequestItem(String indexPattern, List<String> docIds, List<String> terms) {
+        int size = Math.min(500, Math.max(100, matchingCoarseSize * Math.max(1, docIds.size()) * 10));
+        return new RequestItem.Builder()
+                .header(h -> h.index(evidenceIndices(indexPattern)))
+                .body(b -> {
+                    b.trackTotalHits(h -> h.enabled(false));
+                    b.size(size);
+                    b.source(s -> s.filter(f -> f.includes(
+                            "content", "display_content", "chunk_granularity",
+                            "metadata.source", "metadata.chunk_id", "metadata.is_latest", "metadata.doc_id")));
+                    b.query(q -> q.bool(bool -> {
+                        bool.filter(f -> f.bool(latestBool -> latestBool
+                                .should(s -> s.term(t -> t.field("metadata.is_latest").value(true)))
+                                .should(s -> s.bool(bNot -> bNot.mustNot(mn -> mn.exists(e -> e.field("metadata.is_latest")))))
+                                .minimumShouldMatch("1")));
+                        bool.must(m -> m.bool(anyTerm -> {
+                            for (String term : terms) {
+                                anyTerm.should(s -> s.bool(oneTerm -> oneTerm
+                                        .should(ss -> ss.matchPhrase(mp -> mp.field("content").query(term).slop(0).boost(8.0f)))
+                                        .should(ss -> ss.matchPhrase(mp -> mp.field("display_content").query(term).slop(0).boost(2.0f)))
+                                        .minimumShouldMatch("1")));
+                            }
+                            return anyTerm.minimumShouldMatch("1");
+                        }));
+                        bool.should(s -> s.term(t -> t.field("chunk_granularity").value("coarse").boost(5.0f)));
+                        bool.should(s -> s.bool(missing -> missing.mustNot(mn -> mn.exists(e -> e.field("chunk_granularity"))).boost(5.0f)));
+                        bool.should(s -> s.term(t -> t.field("chunk_granularity").value("fine").boost(1.0f)));
+                        return bool;
+                    }));
+                    return b;
+                })
+                .build();
+    }
+
     /**
      * 构建哈希 ID 组的批量匹配查询：用 terms 过滤所有 metadata.doc_id。
      */
@@ -331,7 +410,7 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
                 .collect(Collectors.toList());
 
         return new RequestItem.Builder()
-                .header(h -> h.index(indexPattern))
+                .header(h -> h.index(evidenceIndices(indexPattern)))
                 .body(b -> {
                     b.trackTotalHits(h -> h.enabled(false));
                     b.size(matchingCoarseSize * hashDocIds.size());
@@ -387,7 +466,7 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
                 .collect(Collectors.toList());
 
         return new RequestItem.Builder()
-                .header(h -> h.index(indexPattern))
+                .header(h -> h.index(evidenceIndices(indexPattern)))
                 .body(b -> {
                     b.trackTotalHits(h -> h.enabled(false));
                     b.size(matchingCoarseSize * filenameDocIds.size());
@@ -437,10 +516,10 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
                 .collect(Collectors.toList());
 
         return new RequestItem.Builder()
-                .header(h -> h.index(indexPattern))
+                .header(h -> h.index(evidenceIndices(indexPattern)))
                 .body(b -> {
                     b.trackTotalHits(h -> h.enabled(false));
-                    b.size(MAX_DISPLAY_COARSE * hashDocIds.size());
+                    b.size(resolveDisplayCoarseSize() * hashDocIds.size());
                     b.source(s -> s.filter(f -> f.includes(
                             "content", "display_content", "chunk_granularity",
                             "metadata.source", "metadata.chunk_id", "metadata.is_latest", "metadata.doc_id")));
@@ -479,10 +558,10 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
                 .collect(Collectors.toList());
 
         return new RequestItem.Builder()
-                .header(h -> h.index(indexPattern))
+                .header(h -> h.index(evidenceIndices(indexPattern)))
                 .body(b -> {
                     b.trackTotalHits(h -> h.enabled(false));
-                    b.size(MAX_DISPLAY_COARSE * filenameDocIds.size());
+                    b.size(resolveDisplayCoarseSize() * filenameDocIds.size());
                     b.source(s -> s.filter(f -> f.includes(
                             "content", "display_content", "chunk_granularity",
                             "metadata.source", "metadata.chunk_id", "metadata.is_latest")));
@@ -587,6 +666,9 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
             if (matchedDocId == null && !metaSource.isEmpty() && sourceToDocId.containsKey(metaSource)) {
                 matchedDocId = sourceToDocId.get(metaSource);
             }
+            if (matchedDocId == null) {
+                matchedDocId = resolveDocIdFromChunkId(stringValue(hit.id()), hashIdSet);
+            }
 
             if (matchedDocId == null || !result.containsKey(matchedDocId)) {
                 continue;
@@ -604,6 +686,40 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
             chunk.put("matched_terms", matchedTerms);
             result.get(matchedDocId).add(chunk);
         }
+    }
+
+    private String resolveDocIdFromChunkId(String chunkId, Set<String> candidateDocIds) {
+        if (chunkId == null || chunkId.isEmpty() || candidateDocIds == null || candidateDocIds.isEmpty()) {
+            return null;
+        }
+        for (String docId : candidateDocIds) {
+            if (docId == null || docId.isEmpty()) {
+                continue;
+            }
+            // 存量 chunk 可能缺 metadata.doc_id，但 _id 仍保留 docId 前缀；只接受明确分片后缀，避免误归属普通下划线 ID。
+            if (chunkId.equals(docId + "_chunk")
+                    || chunkId.startsWith(docId + "_chunk_")
+                    || chunkId.equals(docId + "_fine")
+                    || chunkId.startsWith(docId + "_fine_")) {
+                return docId;
+            }
+        }
+        return null;
+    }
+
+    private boolean chunksContainAnyMatchedTerm(List<Map<String, Object>> chunks, List<String> terms) {
+        if (chunks == null || chunks.isEmpty() || terms == null || terms.isEmpty()) {
+            return false;
+        }
+        for (Map<String, Object> chunk : chunks) {
+            List<String> matched = toStringList(chunk.get("matched_terms"));
+            for (String term : terms) {
+                if (matched.contains(term)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -641,7 +757,7 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
 
     private RequestItem buildMatchingCoarseRequestItem(String indexPattern, String docId, List<String> terms, String fileName) {
         return new RequestItem.Builder()
-            .header(h -> h.index(indexPattern))
+            .header(h -> h.index(evidenceIndices(indexPattern)))
             .body(b -> {
                 b.trackTotalHits(h -> h.enabled(false));
                 b.size(matchingCoarseSize);
@@ -674,10 +790,10 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
 
     private RequestItem buildFallbackCoarseRequestItem(String indexPattern, String docId, String fileName) {
         return new RequestItem.Builder()
-            .header(h -> h.index(indexPattern))
+            .header(h -> h.index(evidenceIndices(indexPattern)))
             .body(b -> b
                 .trackTotalHits(h -> h.enabled(false))
-                .size(MAX_DISPLAY_COARSE)
+                .size(resolveDisplayCoarseSize())
                 .source(s -> s.filter(f -> f.includes(
                         "content",
                         "display_content",
@@ -722,7 +838,7 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
 
     private List<Map<String, Object>> fetchFallbackCoarse(String indexPattern, String docId) throws Exception {
         SearchRequest request = baseCoarseRequest(indexPattern, docId)
-            .size(MAX_DISPLAY_COARSE)
+            .size(resolveDisplayCoarseSize())
             .query(q -> q.bool(b -> {
                 addDocAndCoarseFilters(b, docId, null);
                 return b;
@@ -854,7 +970,8 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
             missing.removeAll(preCoveredTerms);
         }
         Set<String> usedIds = new LinkedHashSet<>();
-        while (!missing.isEmpty() && chosen.size() < MAX_DISPLAY_COARSE) {
+        int displayLimit = resolveDisplayCoarseSize();
+        while (!missing.isEmpty() && chosen.size() < displayLimit) {
             Map<String, Object> best = null;
             int bestGain = 0;
             double bestScore = -1.0;
@@ -890,7 +1007,7 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
         // 部分覆盖的证据对用户仍有参考价值。
 
         for (Map<String, Object> chunk : candidates) {
-            if (chosen.size() >= MAX_DISPLAY_COARSE) {
+            if (chosen.size() >= displayLimit) {
                 break;
             }
             String id = stringValue(chunk.get("_id"));
@@ -899,6 +1016,22 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
             }
         }
         return chosen;
+    }
+
+    int resolveDisplayCoarseSize() {
+        return resolvePositiveInt(displayCoarseSize, 3);
+    }
+
+    int resolvePositiveInt(String configured, int defaultValue) {
+        if (configured == null) {
+            return defaultValue;
+        }
+        try {
+            int parsed = Integer.parseInt(configured.trim());
+            return parsed > 0 ? parsed : defaultValue;
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
     }
 
     private boolean coversAllTerms(Set<String> matchedTerms, List<String> terms) {
@@ -1013,6 +1146,63 @@ public class KeywordCoarseEvidenceStep implements SearchPipelineStep {
 
     private String stringValue(Object obj) {
         return obj == null ? "" : String.valueOf(obj);
+    }
+
+    /**
+     * 解析关键词证据回查使用的索引范围。
+     *
+     * 业务功能：
+     *   关键词文档级召回完成后，本步骤需要回查 coarse chunk 作为展示证据。
+     *   该回查不能重新扩大索引范围，只能沿用 SearchIndexResolver 写入
+     *   SearchContext.resolvedIndexPattern 的结果。
+     *
+     * 关键流程：
+     *   1. 优先使用 resolvedIndexPattern，它已经包含角色索引 ACL 的判定结果；
+     *   2. resolvedIndexPattern 为空时才退回租户策略配置；
+     *   3. 多个物理索引用逗号表达式原样交给 ES search/msearch，不改回 kb_document 读别名。
+     *
+     * @param context 搜索上下文
+     * @return coarse 证据回查应使用的索引表达式
+     */
+    String resolveEvidenceIndexPattern(SearchContext context) {
+        if (context == null) {
+            return "kb_document";
+        }
+        String resolved = stringValue(context.getResolvedIndexPattern()).trim();
+        if (!resolved.isEmpty()) {
+            return resolved;
+        }
+        if (context.getTenantPolicy() != null) {
+            String policyIndex = stringValue(context.getTenantPolicy().getIndexPattern()).trim();
+            if (!policyIndex.isEmpty()) {
+                return policyIndex;
+            }
+        }
+        return "kb_document";
+    }
+
+    /**
+     * 业务功能：将逗号分隔的索引表达式转换为 MSearch header 可识别的索引列表。
+     * 关键流程：SearchRequest 可以接受逗号表达式，但 MSearch header 的 index(String, String...)
+     * 会把单个逗号字符串当成一个索引名；因此这里必须显式拆分，避免多 kb_document_* 索引回查失败。
+     */
+    List<String> evidenceIndices(String indexPattern) {
+        List<String> indices = new ArrayList<>();
+        String raw = stringValue(indexPattern).trim();
+        if (raw.isEmpty()) {
+            indices.add("kb_document");
+            return indices;
+        }
+        for (String part : raw.split(",")) {
+            String index = part.trim();
+            if (!index.isEmpty()) {
+                indices.add(index);
+            }
+        }
+        if (indices.isEmpty()) {
+            indices.add("kb_document");
+        }
+        return indices;
     }
 
     @SuppressWarnings("unchecked")

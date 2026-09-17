@@ -84,6 +84,14 @@ kafka:
 kb:
   internal:
     token: ${KB_INTERNAL_TOKEN:kb-dev-token-change-me-in-prod}
+  index-acl:
+    # 默认 false 兼容历史租户；完成全量索引 ACL 配置后可改为 true，使无规则索引默认拒绝。
+    default-deny: ${KB_INDEX_ACL_DEFAULT_DENY:false}
+  search:
+    # 历史权限投影已完成补齐后，缺少权限字段不再代表可访问；如需临时回滚可通过环境变量改回 true。
+    legacy-missing-permission-allow: ${KB_SEARCH_LEGACY_MISSING_PERMISSION_ALLOW:false}
+    # kb_doc_search 已补齐 source_index 后，缺失 source_index 的异常数据不应绕过角色索引范围过滤。
+    doc-search-missing-source-index-allow: ${KB_SEARCH_DOC_SEARCH_MISSING_SOURCE_INDEX_ALLOW:false}
 
 # 搜索服务安全配置（P0-6 / P1-3）
 search:
@@ -94,6 +102,44 @@ search:
   # Search total SLA timeout in milliseconds.
   total:
     sla-ms: 10000
+  doc-search:
+    enabled: ${SEARCH_DOC_SEARCH_ENABLED:true}
+    keyword-enabled: ${SEARCH_DOC_SEARCH_KEYWORD_ENABLED:true}
+    home-prefilter-enabled: ${SEARCH_DOC_SEARCH_HOME_PREFILTER_ENABLED:true}
+    hybrid-prefilter-enabled: ${SEARCH_DOC_SEARCH_HYBRID_PREFILTER_ENABLED:true}
+    index: ${KB_DOC_SEARCH_READ_ALIAS:kb_doc_search}
+    write-index: ${KB_DOC_SEARCH_WRITE_ALIAS:kb_doc_search_write}
+    prefilter-max-candidates: ${SEARCH_DOC_SEARCH_PREFILTER_MAX_CANDIDATES:500}
+  # ── keyword 检索性能优化开关（均可用环境变量热改回滚，详见各 @Value 注释）──
+  keyword:
+    coarse:
+      # 每个 doc 槽位拉取的匹配 coarse 分片数上限（前端展示仅需 3，原硬编码 50）
+      matching-size: ${SEARCH_KEYWORD_COARSE_MATCHING_SIZE:12}
+      # 取证文档数 = min(matched, max(returnTopK, ceil(returnTopK*multiplier)))，原固定 3
+      doc-multiplier: ${SEARCH_KEYWORD_COARSE_DOC_MULTIPLIER:1.5}
+    # legacy chunk 索引召回是否启用 leading wildcard（亿级下是 O(term_dict) 扫描，默认关）
+    legacy-wildcard:
+      enabled: ${SEARCH_KEYWORD_LEGACY_WILDCARD_ENABLED:false}
+    # keyword 文档级索引无结果时是否回退旧 chunk collapse 召回；亿级过渡版默认关闭，避免重路径常态化
+    legacy-fallback:
+      enabled: ${SEARCH_KEYWORD_LEGACY_FALLBACK_ENABLED:false}
+    # keyword 模式是否跳过 LiteralRecall（默认关：需生产数据确认零命中规律后再开）
+    literal:
+      skip: ${SEARCH_KEYWORD_LITERAL_SKIP:false}
+  # 首页 keyword 检索 Redis 结果缓存（与 /search 安全语义一致，默认开）
+  home:
+    cache:
+      enabled: ${SEARCH_HOME_CACHE_ENABLED:true}
+    hybrid:
+      # 首页只展示预览和 QA 证据，限制 hybrid 后端深度，避免 pageSize=50 放大 ColBERT 精排输入。
+      top-k: ${SEARCH_HOME_HYBRID_TOP_K:12}
+  hybrid:
+    global-knn:
+      enabled: ${SEARCH_HYBRID_GLOBAL_KNN_ENABLED:false}
+    candidate-knn-max-sources: ${SEARCH_HYBRID_CANDIDATE_KNN_MAX_SOURCES:200}
+    global-chunk-recall:
+      enabled: ${SEARCH_HYBRID_GLOBAL_CHUNK_RECALL_ENABLED:false}
+    candidate-chunk-max-sources: ${SEARCH_HYBRID_CANDIDATE_CHUNK_MAX_SOURCES:200}
 
 ai:
   service:
@@ -147,9 +193,13 @@ editor:
     meta-index: ${EDITOR_SIMILARITY_META_INDEX:kb_doc_meta_read}
     meta-write-index: ${EDITOR_SIMILARITY_META_WRITE_INDEX:kb_doc_meta_write}
     chunk-fallback-index: ${EDITOR_SIMILARITY_CHUNK_FALLBACK_INDEX:kb_document}
+    doc-search-enabled: ${EDITOR_SIMILARITY_DOC_SEARCH_ENABLED:true}
+    doc-search-index: ${EDITOR_SIMILARITY_DOC_SEARCH_INDEX:${KB_DOC_SEARCH_READ_ALIAS:kb_doc_search}}
+    doc-search-max-candidates: ${EDITOR_SIMILARITY_DOC_SEARCH_MAX_CANDIDATES:8}
     max-candidates: ${EDITOR_SIMILARITY_MAX_CANDIDATES:20}
     knn-num-candidates: ${EDITOR_SIMILARITY_KNN_NUM_CANDIDATES:120}
     rerank-enabled: ${EDITOR_SIMILARITY_RERANK_ENABLED:true}
+    rerank-max-candidates: ${EDITOR_SIMILARITY_RERANK_MAX_CANDIDATES:3}
     rerank-min-score: ${EDITOR_SIMILARITY_RERANK_MIN_SCORE:0.50}
     rerank-weight: ${EDITOR_SIMILARITY_RERANK_WEIGHT:0.30}
     rerank-weight-with-evidence: ${EDITOR_SIMILARITY_RERANK_WEIGHT_WITH_EVIDENCE:0.60}
@@ -203,7 +253,7 @@ external:
     dev-mode: ${EXT_ORG_DEV_MODE:true}
     # 同步任务开启/关闭开关
     sync:
-      enabled: ${EXT_ORG_SYNC_ENABLED:true}
+      enabled: ${EXT_ORG_SYNC_ENABLED:false}
     # 部门树同步定时任务 Cron 表达式（默认每天凌晨整点同步一次）
     sync-cron: ${EXT_ORG_SYNC_CRON:0 0 * * * ?}
 

@@ -2,12 +2,15 @@ package com.boyang.search.pipeline.steps;
 
 import co.elastic.clients.elasticsearch._types.query_dsl.Query;
 import co.elastic.clients.elasticsearch.core.msearch.RequestItem;
+import com.boyang.search.entity.SysTenantPolicy;
+import com.boyang.search.pipeline.SearchContext;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Collections;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class KeywordCoarseEvidenceLiteralQueryTest {
@@ -54,6 +57,27 @@ class KeywordCoarseEvidenceLiteralQueryTest {
 
         assertFalse(containsMatchQuery(item.body().query()),
                 "keyword batched coarse evidence recall must not use ES analyzed match");
+    }
+
+    @Test
+    void evidenceIndexPatternKeepsResolvedPhysicalIndexScope() {
+        KeywordCoarseEvidenceStep step = new KeywordCoarseEvidenceStep();
+        SearchContext context = new SearchContext();
+        context.setResolvedIndexPattern("kb_document_policy,kb_document_notice");
+
+        assertEquals("kb_document_policy,kb_document_notice",
+                step.resolveEvidenceIndexPattern(context));
+    }
+
+    @Test
+    void evidenceIndexPatternFallsBackToTenantPolicyOnlyWhenResolvedScopeMissing() {
+        KeywordCoarseEvidenceStep step = new KeywordCoarseEvidenceStep();
+        SearchContext context = new SearchContext();
+        SysTenantPolicy policy = new SysTenantPolicy();
+        policy.setAllowedIndices("kb_document");
+        context.setTenantPolicy(policy);
+
+        assertEquals("kb_document", step.resolveEvidenceIndexPattern(context));
     }
 
     private boolean containsMatchQuery(Query query) {

@@ -1,0 +1,262 @@
+{
+  "kb_document_law": {
+    "mappings": {
+      "properties": {
+        "acl_tokens": {
+          "fields": {
+            "keyword": {
+              "ignore_above": 256,
+              "type": "keyword"
+            }
+          },
+          "type": "text"
+        },
+        "chunk_granularity": {
+          "type": "keyword"
+        },
+        "colloquial_vector": {
+          "dims": 1024,
+          "type": "dense_vector"
+        },
+        "content": {
+          "analyzer": "ik_max_word",
+          "search_analyzer": "ik_smart",
+          "type": "text"
+        },
+        "content_hash": {
+          "fields": {
+            "keyword": {
+              "ignore_above": 256,
+              "type": "keyword"
+            }
+          },
+          "type": "text"
+        },
+        "display_content": {
+          "fields": {
+            "keyword": {
+              "ignore_above": 256,
+              "type": "keyword"
+            }
+          },
+          "type": "text"
+        },
+        "index_code": {
+          "type": "keyword"
+        },
+        "keywords": {
+          "type": "keyword"
+        },
+        "metadata": {
+          "properties": {
+            "access_groups": {
+              "type": "keyword"
+            },
+            "acl_tokens": {
+              "type": "keyword"
+            },
+            "chunk_id": {
+              "type": "integer"
+            },
+            "chunk_type": {
+              "fields": {
+                "keyword": {
+                  "ignore_above": 256,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "data_source": {
+              "type": "keyword"
+            },
+            "dept_code_full": {
+              "type": "keyword"
+            },
+            "dept_l2": {
+              "type": "keyword"
+            },
+            "dept_l4": {
+              "type": "keyword"
+            },
+            "dept_l6": {
+              "type": "keyword"
+            },
+            "dept_l9": {
+              "type": "keyword"
+            },
+            "doc_id": {
+              "fields": {
+                "keyword": {
+                  "ignore_above": 256,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "doc_type": {
+              "fields": {
+                "keyword": {
+                  "ignore_above": 256,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "doc_version": {
+              "type": "integer"
+            },
+            "document_number": {
+              "type": "keyword"
+            },
+            "dynamic_meta": {
+              "dynamic": "false",
+              "type": "object"
+            },
+            "index_code": {
+              "fields": {
+                "keyword": {
+                  "ignore_above": 256,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "is_latest": {
+              "type": "boolean"
+            },
+            "is_preamble": {
+              "type": "boolean"
+            },
+            "owner": {
+              "type": "keyword"
+            },
+            "owner_dept_id": {
+              "type": "keyword"
+            },
+            "owner_unit_code": {
+              "fields": {
+                "keyword": {
+                  "ignore_above": 256,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "page_end": {
+              "type": "long"
+            },
+            "page_start": {
+              "type": "long"
+            },
+            "parse_status": {
+              "fields": {
+                "keyword": {
+                  "ignore_above": 256,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "permission_version": {
+              "type": "long"
+            },
+            "publish_time": {
+              "format": "yyyy-MM-dd||epoch_millis",
+              "type": "date"
+            },
+            "quality_score": {
+              "type": "float"
+            },
+            "search_queries": {
+              "type": "text"
+            },
+            "section_path": {
+              "analyzer": "ik_smart",
+              "fields": {
+                "keyword": {
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "source": {
+              "type": "keyword"
+            },
+            "source_index": {
+              "fields": {
+                "keyword": {
+                  "ignore_above": 256,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "tags": {
+              "type": "text"
+            },
+            "tags_kw": {
+              "type": "keyword"
+            },
+            "title": {
+              "analyzer": "ik_max_word",
+              "fields": {
+                "keyword": {
+                  "type": "keyword"
+                }
+              },
+              "search_analyzer": "ik_smart",
+              "type": "text"
+            },
+            "updated_by": {
+              "type": "keyword"
+            },
+            "uploader_id": {
+              "type": "keyword"
+            },
+            "version_at": {
+              "format": "epoch_millis",
+              "type": "date"
+            },
+            "visibility": {
+              "type": "keyword"
+            },
+            "visible_unit_codes": {
+              "fields": {
+                "keyword": {
+                  "ignore_above": 256,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            }
+          }
+        },
+        "owner_unit_code": {
+          "type": "keyword"
+        },
+        "parent_chunk_id": {
+          "type": "keyword"
+        },
+        "permission_version": {
+          "type": "long"
+        },
+        "source_index": {
+          "type": "keyword"
+        },
+        "sparse_vector": {
+          "type": "rank_features"
+        },
+        "vector": {
+          "dims": 1024,
+          "index": true,
+          "similarity": "cosine",
+          "type": "dense_vector"
+        },
+        "visible_unit_codes": {
+          "type": "keyword"
+        }
+      }
+    }
+  }
+}

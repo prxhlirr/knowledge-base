@@ -132,6 +132,7 @@ public class KeywordResultAssembleStep implements SearchPipelineStep {
             result.put("visibility", visibility);
             result.put("cacheable", isCacheable(visibility));
             result.put("matched_terms", new ArrayList<>(required));
+            copyPermissionProjection(result, source, metadata, doc);
 
             double rankScore = numberValue(doc.get("keyword_rank_score"));
             double score = Math.max(0.05, Math.min(0.99, 0.50 + (rankScore / topRankScore) * 0.49));
@@ -234,8 +235,11 @@ public class KeywordResultAssembleStep implements SearchPipelineStep {
                 literalResult.put("score", 0.99); // literal 精确命中最高分
                 literalResult.put("chunks", new ArrayList<>());
                 literalResult.put("chunk_text", "");
-                literalResult.put("cacheable", true);
+                String literalVisibility = visibilityFromSource(source);
+                literalResult.put("visibility", literalVisibility);
+                literalResult.put("cacheable", isCacheable(literalVisibility));
                 literalResult.put("matched_terms", new ArrayList<>(required));
+                copyPermissionProjection(literalResult, source, source != null ? castMap(source.get("metadata")) : null, hit);
                 literalResults.add(literalResult);
             }
             // literal 命中插入到结果最前面（优先级最高）
@@ -247,6 +251,73 @@ public class KeywordResultAssembleStep implements SearchPipelineStep {
 
         context.setFinalResult(results);
         System.out.printf("[KeywordResult] assembled=%d%n", results.size());
+    }
+
+    /**
+     * 业务功能：把文档权限投影字段提升到 HTTP 响应顶层，支撑结果审计与端到端权限验证。
+     * 关键流程：优先读取 ES _source，其次读取 metadata，最后读取召回阶段平铺在 doc/hit 顶层的字段。
+     */
+    private void copyPermissionProjection(Map<String, Object> result, Map<String, Object> source,
+                                          Map<String, Object> metadata, Map<String, Object> fallback) {
+        putFirstPresent(result, "source_index",
+                source != null ? source.get("source_index") : null,
+                metadata != null ? metadata.get("source_index") : null,
+                fallback != null ? fallback.get("source_index") : null);
+        putFirstPresent(result, "index_code",
+                source != null ? source.get("index_code") : null,
+                metadata != null ? metadata.get("index_code") : null,
+                fallback != null ? fallback.get("index_code") : null);
+        putFirstPresent(result, "owner_unit_code",
+                source != null ? source.get("owner_unit_code") : null,
+                metadata != null ? metadata.get("owner_unit_code") : null,
+                fallback != null ? fallback.get("owner_unit_code") : null);
+        putFirstPresent(result, "visible_unit_codes",
+                source != null ? source.get("visible_unit_codes") : null,
+                metadata != null ? metadata.get("visible_unit_codes") : null,
+                fallback != null ? fallback.get("visible_unit_codes") : null);
+        putFirstPresent(result, "permission_version",
+                source != null ? source.get("permission_version") : null,
+                metadata != null ? metadata.get("permission_version") : null,
+                fallback != null ? fallback.get("permission_version") : null);
+    }
+
+    private void putFirstPresent(Map<String, Object> result, String key, Object... values) {
+        for (Object value : values) {
+            if (value == null) {
+                continue;
+            }
+            if (value instanceof String && ((String) value).trim().isEmpty()) {
+                continue;
+            }
+            result.put(key, value);
+            return;
+        }
+    }
+
+    private void copyPermissionProjection(Map<String, Object> result, Map<String, Object> source,
+                                          Map<String, Object> metadata) {
+        // Keyword 结果组装会丢弃 ES _source；权限字段必须在这里提升，否则 HTTP 响应无法证明命中文档来源。
+        putIfPresent(result, "source_index", source != null ? source.get("source_index") : null,
+                metadata != null ? metadata.get("source_index") : null);
+        putIfPresent(result, "index_code", source != null ? source.get("index_code") : null,
+                metadata != null ? metadata.get("index_code") : null);
+        putIfPresent(result, "owner_unit_code", source != null ? source.get("owner_unit_code") : null,
+                metadata != null ? metadata.get("owner_unit_code") : null);
+        putIfPresent(result, "visible_unit_codes", source != null ? source.get("visible_unit_codes") : null,
+                metadata != null ? metadata.get("visible_unit_codes") : null);
+        putIfPresent(result, "permission_version", source != null ? source.get("permission_version") : null,
+                metadata != null ? metadata.get("permission_version") : null);
+    }
+
+    private void putIfPresent(Map<String, Object> result, String key, Object primary, Object fallback) {
+        Object value = primary != null ? primary : fallback;
+        if (value == null) {
+            return;
+        }
+        if (value instanceof String && ((String) value).trim().isEmpty()) {
+            return;
+        }
+        result.put(key, value);
     }
 
     @SuppressWarnings("unchecked")
@@ -382,6 +453,18 @@ public class KeywordResultAssembleStep implements SearchPipelineStep {
 
     private boolean isCacheable(String visibility) {
         return "PUBLIC".equals(visibility) || "INTERNAL".equals(visibility);
+    }
+
+    private String visibilityFromSource(Map<String, Object> source) {
+        if (source == null) {
+            return "";
+        }
+        Map<String, Object> metadata = castMap(source.get("metadata"));
+        String visibility = metadata != null ? stringValue(metadata.get("visibility")) : "";
+        if (visibility.isEmpty()) {
+            visibility = stringValue(source.get("visibility"));
+        }
+        return visibility;
     }
 
     private String stringValue(Object obj) {

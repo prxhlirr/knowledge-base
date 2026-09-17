@@ -1,0 +1,7 @@
+'稿.docx'
+   chunk is_latest 分布: [{'key': 1, 'key_as_string': 'true', 'doc_count': 33}]
+   doc-level is_latest = True  doc_version = 1
+
+'test.doc'
+   chunk is_latest 分布: [{'key': 1, 'key_as_string': 'true', 'doc_count': 115}]
+   doc-level is_latest = True  doc_version = 10

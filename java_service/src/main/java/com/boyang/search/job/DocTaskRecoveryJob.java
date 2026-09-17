@@ -15,10 +15,13 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 文档任务自动恢复定时器（P0 #5/#6 + P0.2 修复）。
@@ -143,7 +146,117 @@ public class DocTaskRecoveryJob {
             ? origVisibility : "INTERNAL");
         payload.put("deptCode",
             task.getDeptCode() != null ? task.getDeptCode() : "");
+        payload.putAll(buildRecoveryUnitProjection((String) payload.get("deptCode")));
+        payload.put("acl_tokens_json", buildRecoveryAclTokensJson(
+            (String) payload.get("visibility"),
+            (String) payload.get("deptCode")
+        ));
         return payload;
+    }
+
+    /**
+     * 业务功能：为恢复重推任务补齐 ES 入库所需的 acl_tokens_json。
+     * 关键流程：基于 sys_doc_import_task 中已持久化的 visibility/deptCode 重建可证明安全的 ACL Token。
+     * 设计原因：恢复任务无法读取原 Redis payload；若缺失 acl_tokens_json，Python 会降级为 _INTERNAL，
+     *          导致 DEPT/PRIVATE/GRANT 文档在 ES 前置过滤阶段被错误放宽。
+     *
+     * @param visibility 文档可见度
+     * @param deptCode 文档归属单位编码
+     * @return JSON 数组字符串，供 Python Worker 直接写入 ES acl_tokens
+     */
+    static String buildRecoveryAclTokensJson(String visibility, String deptCode) {
+        List<String> tokens = new ArrayList<>();
+        String vis = visibility != null && !visibility.trim().isEmpty()
+            ? visibility.trim().toUpperCase()
+            : "INTERNAL";
+
+        switch (vis) {
+            case "PUBLIC":
+                tokens.add("_PUBLIC");
+                break;
+            case "INTERNAL":
+                tokens.add("_INTERNAL");
+                break;
+            case "DEPT":
+                if (deptCode != null && !deptCode.trim().isEmpty()) {
+                    for (String code : buildAdministrativeAncestorChain(deptCode)) {
+                        tokens.add("dept::" + code);
+                    }
+                }
+                if (tokens.isEmpty()) {
+                    tokens.add("_NO_ACCESS");
+                }
+                break;
+            case "PRIVATE":
+            case "GRANT":
+                // sys_doc_import_task 未持久化 uploader/grantedUsers/grantedRoles。
+                // 恢复链路不能猜测授权主体，必须保守拒绝 ES 前置命中，避免权限被扩大为 INTERNAL。
+                tokens.add("_NO_ACCESS");
+                break;
+            default:
+                tokens.add("_NO_ACCESS");
+                break;
+        }
+        return toJsonArray(tokens);
+    }
+
+    private static String toJsonArray(List<String> values) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append('"').append(values.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+        }
+        sb.append(']');
+        return sb.toString();
+    }
+
+    /**
+     * 业务功能：为恢复重推任务补齐单位权限投影字段，避免故障恢复链路生成缺权限字段的新 payload。
+     * 关键流程：恢复任务只有历史 task.deptCode，没有完整部门树服务上下文，因此采用行政区划编码的
+     *          两位层级兜底生成“本级 + 上级”链；非行政编码则至少保留自身。
+     * 设计原因：恢复任务不能比正常入库链路少字段，否则 Redis 丢失后的重推会制造权限投影不完整数据。
+     *
+     * @param deptCode 文档归属单位编码
+     * @return ownerUnitCode、visibleUnitCodes、permissionVersion 三个 Redis payload 字段
+     */
+    static Map<String, Object> buildRecoveryUnitProjection(String deptCode) {
+        Map<String, Object> projection = new HashMap<>();
+        String ownerUnitCode = deptCode != null ? deptCode.trim() : "";
+        List<String> visibleUnitCodes = new ArrayList<>();
+
+        if (ownerUnitCode.isEmpty()) {
+            ownerUnitCode = "global";
+            visibleUnitCodes.add("global");
+        } else {
+            visibleUnitCodes.addAll(buildAdministrativeAncestorChain(ownerUnitCode));
+        }
+
+        projection.put("ownerUnitCode", ownerUnitCode);
+        projection.put("visibleUnitCodes", visibleUnitCodes);
+        projection.put("permissionVersion", System.currentTimeMillis());
+        return projection;
+    }
+
+    private static List<String> buildAdministrativeAncestorChain(String deptCode) {
+        Set<String> chain = new LinkedHashSet<>();
+        String normalized = normalizeDeptCode(deptCode);
+        chain.add(normalized);
+        if (normalized.matches("\\d+")) {
+            for (int len = normalized.length() - 2; len >= 2; len -= 2) {
+                chain.add(normalized.substring(0, len));
+            }
+        }
+        return new ArrayList<>(chain);
+    }
+
+    private static String normalizeDeptCode(String code) {
+        String c = code == null ? "" : code.trim();
+        while (c.length() > 2 && c.endsWith("00")) {
+            c = c.substring(0, c.length() - 2);
+        }
+        return c;
     }
 
     /**

@@ -9,6 +9,7 @@ import com.boyang.search.entity.SysTenantPolicy;
 import com.boyang.search.gateway.AiEngineGateway;
 import com.boyang.search.pipeline.SearchContext;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -53,11 +54,33 @@ public class SemanticRecallStrategy implements RecallStrategy {
     @Autowired
     private EsRecallUtils utils;
 
+    /**
+     * 业务功能：控制 semantic 模式 Sparse 召回 ES 超时。
+     * 设计原因：Sparse 是可降级召回分支，独立配置便于生产环境按负载收敛资源占用。
+     */
+    @Value("${search.semantic.sparse-timeout-ms:${SEARCH_SEMANTIC_SPARSE_TIMEOUT_MS:2000}}")
+    private String semanticSparseTimeoutMs = "2000";
+
+    /**
+     * 业务功能：控制 semantic 模式 BM25 兜底召回 ES 超时。
+     * 设计原因：BM25 仅承担兜底召回，不应因固定超时拖慢语义主链路。
+     */
+    @Value("${search.semantic.bm25-timeout-ms:${SEARCH_SEMANTIC_BM25_TIMEOUT_MS:2000}}")
+    private String semanticBm25TimeoutMs = "2000";
+
+    /**
+     * 业务功能：控制 semantic 四路召回整体等待时间的默认兜底。
+     * 设计原因：数据库调优配置缺失时仍要有可运维默认值，避免空配置导致链路异常。
+     */
+    @Value("${search.semantic.es-timeout-ms:${SEARCH_SEMANTIC_ES_TIMEOUT_MS:2000}}")
+    private String semanticEsTimeoutMs = "2000";
+
     @Override
     public void recall(SearchContext context) throws Exception {
         String normalizedQuery  = context.getNormalizedQuery();
         SysTenantPolicy   policy  = context.getTenantPolicy();
         SysAiTuningConfig config  = context.getTuningConfig();
+        SysAiTuningConfig effectiveConfig = config != null ? config : new SysAiTuningConfig();
         Map<String, Object> filters     = context.getFilters();
         List<Double>        queryVector = context.getQueryVector();
         String indexPattern = context.getResolvedIndexPattern() != null
@@ -80,8 +103,8 @@ public class SemanticRecallStrategy implements RecallStrategy {
                 .index(indexPattern)
                 .knn(k -> {
                     int kVal = Math.max(context.getRecallTopK(), 100);
-                    // [P1 修复] ES 要求 numCandidates >= k，取 max 确保约束成立，避免 ES 报错
-                    int numCandidates = Math.max(config.getKnnNumCandidates(), kVal * 2);
+                    // 统一由调参配置计算候选窗口，避免亿级索引继续沿用过小的历史默认值。
+                    int numCandidates = effectiveConfig.resolveKnnNumCandidates(kVal);
                     return k.field("vector").queryVector(queryVector)
                         .k(kVal)
                         .numCandidates(numCandidates)
@@ -105,7 +128,7 @@ public class SemanticRecallStrategy implements RecallStrategy {
                 .highlight(h -> h.fields("content", hf -> hf
                     .preTags("<em class='highlight'>").postTags("</em>").fragmentSize(150)
                     .highlightQuery(hq -> hq.match(ma -> ma
-                        .field("content").query(utils.stripNoiseWords(normalizedQuery, config))
+                        .field("content").query(utils.stripNoiseWords(normalizedQuery, effectiveConfig))
                         .minimumShouldMatch("1")))))
                 .build();
         }
@@ -137,7 +160,7 @@ public class SemanticRecallStrategy implements RecallStrategy {
                 SearchRequest sparseReq = new SearchRequest.Builder()
                     .index(indexPattern)
                     .size(Math.max(context.getRecallTopK(), 40))
-                    .timeout("2000ms")
+                    .timeout(resolveSparseTimeoutMs() + "ms")
                     .query(q -> q.bool(b -> {
                         for (int i = 0; i < TOP_N_SPARSE; i++) {
                             final String token  = sortedEntries.get(i).getKey();
@@ -178,7 +201,7 @@ public class SemanticRecallStrategy implements RecallStrategy {
                     SearchRequest bm25Req = new SearchRequest.Builder()
                         .index(indexPattern)
                         .size(Math.max(context.getRecallTopK(), 20))
-                        .timeout("2000ms")
+                        .timeout(resolveBm25TimeoutMs() + "ms")
                         .query(q -> q.bool(b -> {
                             // 宽松 BM25（30%），目的是兜底，不是主导排序
                             b.should(sh -> sh.match(ma -> ma.field("content").query(bm25Query)
@@ -229,7 +252,7 @@ public class SemanticRecallStrategy implements RecallStrategy {
         // 四路并行等待
         try {
             CompletableFuture.allOf(knnFuture, sparseFuture, bm25FallbackFuture, qaFuture)
-                .get(config.getEsQueryTimeout(), TimeUnit.MILLISECONDS);
+                .get(resolveEsTimeoutMs(config), TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
             System.err.println("[SemanticStrategy] KNN+Sparse+BM25+QA allOf 超时，取已完成结果降级继续");
         } catch (Exception e) {
@@ -268,5 +291,31 @@ public class SemanticRecallStrategy implements RecallStrategy {
             sparseResponse   != null ? sparseResponse.hits().hits().size()   : 0,
             bm25FallbackResp != null ? bm25FallbackResp.hits().hits().size() : 0,
             qaHits           != null ? qaHits.size() : 0);
+    }
+
+    int resolveSparseTimeoutMs() {
+        return resolvePositiveTimeoutMs(semanticSparseTimeoutMs, 2000);
+    }
+
+    int resolveBm25TimeoutMs() {
+        return resolvePositiveTimeoutMs(semanticBm25TimeoutMs, 2000);
+    }
+
+    int resolveEsTimeoutMs(SysAiTuningConfig config) {
+        return config != null && config.getEsQueryTimeout() != null
+                ? config.getEsQueryTimeout()
+                : resolvePositiveTimeoutMs(semanticEsTimeoutMs, 2000);
+    }
+
+    int resolvePositiveTimeoutMs(String configured, int defaultValue) {
+        if (configured == null) {
+            return defaultValue;
+        }
+        try {
+            int parsed = Integer.parseInt(configured.trim());
+            return parsed > 0 ? parsed : defaultValue;
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
     }
 }

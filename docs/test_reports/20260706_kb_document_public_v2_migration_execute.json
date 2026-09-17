@@ -1,0 +1,54 @@
+{
+  "mode": "execute",
+  "source_index": "kb_document_public",
+  "target_index": "kb_document_public_v2",
+  "es_host": "http://localhost:9200",
+  "batch_size": 10,
+  "limit": 1000,
+  "sample": 5,
+  "create_target": true,
+  "switch_alias": false,
+  "read_alias": "kb_document",
+  "write_alias": "kb_document_public_write",
+  "started_at": 1783301106974,
+  "finished_at": 1783301108384,
+  "stats": {
+    "scanned": 22,
+    "dry_run_writes": 0,
+    "written": 22,
+    "failed": 0
+  },
+  "alias_actions": [
+    {
+      "remove": {
+        "index": "kb_document_public_v2",
+        "alias": "kb_document"
+      }
+    },
+    {
+      "remove": {
+        "index": "kb_document_public",
+        "alias": "kb_document"
+      }
+    },
+    {
+      "remove": {
+        "index": "kb_document_public",
+        "alias": "kb_document_public_write"
+      }
+    },
+    {
+      "add": {
+        "index": "kb_document_public_v2",
+        "alias": "kb_document"
+      }
+    },
+    {
+      "add": {
+        "index": "kb_document_public_v2",
+        "alias": "kb_document_public_write",
+        "is_write_index": true
+      }
+    }
+  ]
+}

@@ -102,8 +102,9 @@ public class DocPermissionController {
     public ResponseEntity<Map<String, Object>> changeVisibility(@RequestBody Map<String, Object> body) {
         String docId         = (String) body.get("docId");
         String newVisibility = (String) body.get("visibility");
+        String deptCode      = (String) body.get("deptCode");
         String operatorId    = (String) body.getOrDefault("operatorId", "system");
-        permissionService.addVisibilityChange(docId, newVisibility, operatorId);
+        permissionService.addVisibilityChange(docId, newVisibility, deptCode, operatorId);
         Map<String, Object> okBody3 = new java.util.HashMap<>();
         okBody3.put("status", "ok");
         return ResponseEntity.ok(okBody3);

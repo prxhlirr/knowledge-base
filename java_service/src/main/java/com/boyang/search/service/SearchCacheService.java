@@ -9,6 +9,7 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import com.boyang.search.security.UserContextHolder;
+import com.boyang.search.security.JwtVerifier;
 
 import java.security.MessageDigest;
 import java.time.Duration;
@@ -64,7 +65,12 @@ public class SearchCacheService {
         String mode        = searchMode != null ? searchMode : "hybrid";
         String policyVersion = policyVersionService.currentGlobalVersion();
         Set<String> aclTokenSet = new TreeSet<>(UserContextHolder.getAclTokens());
-        String aclDigest = sha256Hex(String.join(",", aclTokenSet));
+        Set<String> roleSet = new TreeSet<>();
+        JwtVerifier.UserIdentity identity = UserContextHolder.getIdentity();
+        if (identity != null && identity.getRoles() != null) {
+            roleSet.addAll(identity.getRoles());
+        }
+        String aclDigest = sha256Hex(String.join(",", aclTokenSet) + "|roles=" + String.join(",", roleSet));
         String raw = appCode + "|" + queryText + "|" + topK + "|" + dataSource + "|" + deptCode
                 + "|" + userId + "|" + aclDigest + "|" + mode + "|" + policyVersion;
         String hash = sha256Hex(raw);
@@ -107,7 +113,7 @@ public class SearchCacheService {
                 .filter(doc -> {
                     Object explicitCacheable = doc.get("cacheable");
                     if (explicitCacheable instanceof Boolean) {
-                        return (Boolean) explicitCacheable;
+                        return (Boolean) explicitCacheable && isResultCacheable(doc);
                     }
                     Map<String, Object> source = (Map<String, Object>) doc.get("_source");
                     Map<String, Object> meta = (source != null)
@@ -131,6 +137,31 @@ public class SearchCacheService {
         } catch (Exception e) {
             log.warn("[SearchCache] put failed, key={} err={}", key, e.getMessage());
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean isResultCacheable(Map<String, Object> doc) {
+        if (doc == null) {
+            return false;
+        }
+        String visibility = stringValue(doc.get("visibility"));
+        Map<String, Object> source = doc.get("_source") instanceof Map
+                ? (Map<String, Object>) doc.get("_source")
+                : null;
+        if (visibility.isEmpty() && source != null) {
+            visibility = stringValue(source.get("visibility"));
+        }
+        Map<String, Object> meta = source != null && source.get("metadata") instanceof Map
+                ? (Map<String, Object>) source.get("metadata")
+                : null;
+        if (visibility.isEmpty() && meta != null) {
+            visibility = stringValue(meta.get("visibility"));
+        }
+        return "PUBLIC".equals(visibility) || "INTERNAL".equals(visibility);
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? "" : String.valueOf(value).trim();
     }
 
     /**

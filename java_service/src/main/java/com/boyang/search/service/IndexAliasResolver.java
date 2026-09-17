@@ -21,6 +21,15 @@ public class IndexAliasResolver {
     public static final String DOCUMENT_INDEX_PREFIX = "kb_document_";
     public static final String WRITE_ALIAS_SUFFIX = "_write";
 
+    /**
+     * 版本化物理索引名后缀正则（kb_document_official_v2 / _v3 ...）。
+     * 仅用于把 ACL 表的存值/查值归一到"逻辑名"，让运行时查表与种子数据对齐。
+     * 注意：ES 检索目标仍需用物理名（v2/v3），不要在此处之外的地方剥离本后缀。
+     * 用正则而非固定字面量，让后续 _v3 重建等无需再改本常量；配合 toLogicalIndex 的守卫，
+     * 既能剥 official_v2/v3，又不会误伤合法的 kb_document_v1（见 toLogicalIndex）。
+     */
+    public static final java.util.regex.Pattern VERSION_SUFFIX = java.util.regex.Pattern.compile("_(v\\d+)$");
+
     public String normalizeReadScope(String allowedScope) {
         List<String> scopes = splitScope(allowedScope);
         if (scopes.isEmpty()) {
@@ -99,6 +108,24 @@ public class IndexAliasResolver {
             return name.substring(0, name.length() - WRITE_ALIAS_SUFFIX.length());
         }
         return name;
+    }
+
+    /**
+     * 把物理索引名归一为 ACL 用的"逻辑名"：剥离版本化后缀 _vN。
+     * 例：kb_document_official_v2 / _v3 -> kb_document_official。
+     * 守卫：剥离后前缀必须仍是 kb_document_* 分区名，且不能是裸读别名 kb_document——
+     * 否则合法的 kb_document_v1 会被错剥成 kb_document（读别名），把 v1 的 ACL 规则错并到别名键上。
+     */
+    public String toLogicalIndex(String name) {
+        String trimmed = trim(name);
+        java.util.regex.Matcher m = VERSION_SUFFIX.matcher(trimmed);
+        if (m.find()) {
+            String prefix = trimmed.substring(0, m.start());
+            if (prefix.startsWith(DOCUMENT_INDEX_PREFIX) && !prefix.equals(DOCUMENT_READ_ALIAS)) {
+                return prefix;
+            }
+        }
+        return trimmed;
     }
 
     public List<String> splitScope(String scope) {

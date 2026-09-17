@@ -61,7 +61,7 @@ public class JwtAuthInterceptor implements HandlerInterceptor {
             if (devAppCode == null || devAppCode.trim().isEmpty()) {
                 devAppCode = "ADMIN_MASTER_KEY"; // 兜底
             }
-            JwtVerifier.UserIdentity godIdentity = new JwtVerifier.UserIdentity("god-admin", "000000", devAppCode, null) {
+            JwtVerifier.UserIdentity godIdentity = new JwtVerifier.UserIdentity("god-admin", "620102900000", devAppCode, null) {
                 @Override
                 public boolean isSuperAdmin() { return true; }
             };
@@ -78,49 +78,35 @@ public class JwtAuthInterceptor implements HandlerInterceptor {
             if (!permissionGuard.isValidInternalToken(request.getHeader("X-Internal-Token"))) {
                 return writeError(response, 401, "未授权访问，需携带有效内部服务凭证（X-Internal-Token）");
             }
-            return true; // 后端任务目前通过此策略通行，不走 JWT
+
+            if (uri.startsWith("/api/v1/internal/")) {
+                return true; // 服务间回调继续只走内部凭证，不绑定用户身份。
+            }
+
+            JwtVerifier.UserIdentity adminIdentity = resolveIdentity(request, response, false);
+            if (adminIdentity == null || adminIdentity.getUserId() == null
+                    || adminIdentity.getUserId().trim().isEmpty()) {
+                if (!response.isCommitted()) {
+                    return writeError(response, 401, "管理端操作必须携带有效用户身份");
+                }
+                return false;
+            }
+            bindIdentity(adminIdentity);
         }
 
         // 2. 搜索及其它请求，按要求抽取 JWT 或者开发模式 Headers 放行并转存 ThreadLocal
         JwtVerifier.UserIdentity identity = null;
-        if (trustGatewayHeaders) {
-            String jwtToken = request.getHeader(jwtVerifier.getJwtHeader());
-            if (jwtToken == null || jwtToken.trim().isEmpty()) {
-                return writeError(response, 401, "生产安全模式：必须携带 JWT Token（Header: " + jwtVerifier.getJwtHeader() + "）");
-            }
-            try {
-                identity = jwtVerifier.verify(jwtToken);
-            } catch (io.jsonwebtoken.ExpiredJwtException e) {
-                return writeError(response, 401, "Token 已过期，请重新登录");
-            } catch (io.jsonwebtoken.JwtException e) {
-                return writeError(response, 401, "Token 无效或签名错误");
-            }
-        } else if (jwtVerifier.isDevMode()) {
-            // 开发模式：直接从 Header 信任身份（跳过 JWT 验签）
-            identity = jwtVerifier.fromHeaders(request);
-
-            // [Dev-Mode 修复] 离线/开发场景下前端通常不传 X-User-Id Header，
-            // 导致 identity.userId = null → AclTokenBuilder 不添加 _INTERNAL token
-            // → ES ACL filter: terms(acl_tokens, ["_PUBLIC"]) 与 ["_INTERNAL"] 无交集 → 0 结果。
-            // 修复：userId 为空时注入 "dev-anonymous" 作为最小登录态，
-            //       使 AclTokenBuilder 能正确添加 _INTERNAL，让 INTERNAL 文档对开发用户可见。
-            // 安全性：此逻辑仅在 jwt.dev-mode=true 时执行，生产走 trustGatewayHeaders=true 路径不受影响。
-            if (identity == null
-                    || identity.getUserId() == null
-                    || identity.getUserId().trim().isEmpty()) {
-                String devAppCode = (identity != null) ? identity.getAppCode() : null;
-                identity = new JwtVerifier.UserIdentity("dev-anonymous", null, devAppCode, null);
+        if (!uri.startsWith("/api/v1/admin/")) {
+            identity = resolveIdentity(request, response, true);
+            if (response.isCommitted()) {
+                return false;
             }
         }
 
 
         // 3. 将验证产生的身份封装注入当前线程，供后续链路透传
         if (identity != null) {
-            // [Phase 1] 在写入 ThreadLocal 前，调用 AclTokenBuilder 一次性展开用户所有身份资产：
-            //   展开部门树祖先层级 + 查询用户 GRANT 授权文档 → 生成扁平化 ACL Token 集合
-            //   此操作每次请求只执行一次，结果随 UserIdentity 在整个 Pipeline 中复用
-            identity.setAclTokens(aclTokenBuilder.buildAclTokens(identity));
-            UserContextHolder.setIdentity(identity);
+            bindIdentity(identity);
         }
 
         // [操作日志] 生成跨服务链路 ID，写入 MDC 供 OperationLogAspect 读取。
@@ -130,6 +116,59 @@ public class JwtAuthInterceptor implements HandlerInterceptor {
         request.setAttribute("traceId", traceId); // 存入 request 属性，供 Controller 透传 AI 服务
 
         return true;
+    }
+
+    /**
+     * 解析请求用户身份。
+     * 业务功能：统一管理生产 JWT 与开发 Header 模式，避免 admin/search 两类路由各自实现身份解析。
+     * 关键流程：生产网关模式必须验签 JWT；开发模式仅在允许匿名兜底时构造临时身份。
+     */
+    private JwtVerifier.UserIdentity resolveIdentity(HttpServletRequest request, HttpServletResponse response,
+                                                     boolean allowDevAnonymous)
+            throws IOException {
+        if (trustGatewayHeaders) {
+            String jwtToken = request.getHeader(jwtVerifier.getJwtHeader());
+            if (jwtToken == null || jwtToken.trim().isEmpty()) {
+                writeError(response, 401, "生产安全模式：必须携带 JWT Token（Header: " + jwtVerifier.getJwtHeader() + "）");
+                return null;
+            }
+            try {
+                return jwtVerifier.verify(jwtToken);
+            } catch (io.jsonwebtoken.ExpiredJwtException e) {
+                writeError(response, 401, "Token 已过期，请重新登录");
+                return null;
+            } catch (io.jsonwebtoken.JwtException e) {
+                writeError(response, 401, "Token 无效或签名错误");
+                return null;
+            }
+        }
+
+        if (jwtVerifier.isDevMode()) {
+            JwtVerifier.UserIdentity identity = jwtVerifier.fromHeaders(request);
+            // 开发模式匿名身份只用于离线检索调试，管理端写操作必须显式携带操作者。
+            if (identity == null
+                    || identity.getUserId() == null
+                    || identity.getUserId().trim().isEmpty()) {
+                if (!allowDevAnonymous) {
+                    return null;
+                }
+                String devAppCode = (identity != null) ? identity.getAppCode() : null;
+                return new JwtVerifier.UserIdentity("dev-anonymous", null, devAppCode, null);
+            }
+            return identity;
+        }
+
+        return null;
+    }
+
+    /**
+     * 绑定当前请求身份。
+     * 业务功能：在请求线程中写入用户身份和 ACL Token，供入库、检索和权限后置校验共用。
+     * 关键流程：先构建扁平化 ACL Token，再写入 ThreadLocal，保证后续链路读取到完整权限上下文。
+     */
+    private void bindIdentity(JwtVerifier.UserIdentity identity) {
+        identity.setAclTokens(aclTokenBuilder.buildAclTokens(identity));
+        UserContextHolder.setIdentity(identity);
     }
 
     @Override

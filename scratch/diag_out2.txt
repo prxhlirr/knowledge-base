@@ -1,0 +1,63 @@
+======================================================================
+source = '稿.docx'
+======================================================================
+[doc-level kb_doc_search]
+   _id          = c3d72cf297dad3ff28047e8f ...
+   doc_id       = 'c3d72cf297dad3ff28047e8f24bd0120_v1'
+   content_hash = '2d4e9593456f9f87484cad48de9704b0f99fedf4cceac8ccd5de8030f2fdfeed'
+   source       = '稿.docx'
+   content len  = 0
+
+[chunk kb_document] 命中 chunk 数: 33
+   chunk _id            = c3d72cf297dad3ff28047e8f24bd0120_v1_fine_12
+   metadata.doc_id      = None
+   metadata.source      = '稿.docx'
+   metadata.is_latest   = False
+   chunk_granularity    = 'fine'
+   content len          = 44
+   content 含「市场」?    True
+
+   chunk _id            = c3d72cf297dad3ff28047e8f24bd0120_v1_fine_19
+   metadata.doc_id      = None
+   metadata.source      = '稿.docx'
+   metadata.is_latest   = False
+   chunk_granularity    = 'fine'
+   content len          = 51
+   content 含「市场」?    True
+
+[对齐判定]
+   doc-level.doc_id = 'c3d72cf297dad3ff28047e8f24bd0120_v1'
+   chunk.metadata.doc_id 取值 = (空/无此字段)
+   >>> hash 分支(metadata.doc_id)命中? False | filename 分支(metadata.source)命中: True(已验证有 chunk)
+
+======================================================================
+source = 'test.doc'
+======================================================================
+[doc-level kb_doc_search]
+   _id          = test.doc ...
+   doc_id       = 'ee200303f52275647138898037a80e0e'
+   content_hash = 'ee200303f52275647138898037a80e0e'
+   source       = 'test.doc'
+   content len  = 0
+
+[chunk kb_document] 命中 chunk 数: 115
+   chunk _id            = ee200303f52275647138898037a80e0e_v10_fine_36
+   metadata.doc_id      = 'ee200303f52275647138898037a80e0e'
+   metadata.source      = 'test.doc'
+   metadata.is_latest   = True
+   chunk_granularity    = 'fine'
+   content len          = 35
+   content 含「市场」?    True
+
+   chunk _id            = ee200303f52275647138898037a80e0e_v10_chunk_4
+   metadata.doc_id      = 'ee200303f52275647138898037a80e0e'
+   metadata.source      = 'test.doc'
+   metadata.is_latest   = True
+   chunk_granularity    = 'coarse'
+   content len          = 348
+   content 含「市场」?    True
+
+[对齐判定]
+   doc-level.doc_id = 'ee200303f52275647138898037a80e0e'
+   chunk.metadata.doc_id 取值 = {'ee200303f52275647138898037a80e0e'}
+   >>> hash 分支(metadata.doc_id)命中? True | filename 分支(metadata.source)命中: True(已验证有 chunk)
